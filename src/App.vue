@@ -95,7 +95,9 @@ const lightThemeOverrides: GlobalThemeOverrides = {
   },
 };
 
-const currentTheme = computed<GlobalTheme | null>(() => (isDarkTheme.value ? darkTheme : null));
+const currentTheme = computed<GlobalTheme | null>(() =>
+  isDarkTheme.value ? darkTheme : null,
+);
 const currentThemeOverrides = computed<GlobalThemeOverrides>(() =>
   isDarkTheme.value ? darkThemeOverrides : lightThemeOverrides,
 );
@@ -106,12 +108,18 @@ function toggleTheme() {
 </script>
 
 <template>
-  <n-config-provider :theme="currentTheme" :theme-overrides="currentThemeOverrides">
-    <n-message-provider placement="bottom-right">
+  <n-config-provider
+    :theme="currentTheme"
+    :theme-overrides="currentThemeOverrides"
+  >
+    <n-message-provider placement="top" :duration="5000">
       <n-global-style />
 
       <main :class="['app-shell', { 'app-shell--light': !isDarkTheme }]">
-        <PortKillWorkbench :is-dark-theme="isDarkTheme" @toggle-theme="toggleTheme" />
+        <PortKillWorkbench
+          :is-dark-theme="isDarkTheme"
+          @toggle-theme="toggleTheme"
+        />
       </main>
     </n-message-provider>
   </n-config-provider>
