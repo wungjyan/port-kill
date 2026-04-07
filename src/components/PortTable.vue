@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  h,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import {
   NButton,
   NDataTable,
@@ -46,12 +54,16 @@ watch(
   () => props.items,
   (items) => {
     const validKeys = new Set(items.map((item) => getRowKey(item)));
-    expandedRowKeys.value = expandedRowKeys.value.filter((key) => validKeys.has(String(key)));
+    expandedRowKeys.value = expandedRowKeys.value.filter((key) =>
+      validKeys.has(String(key)),
+    );
   },
   { immediate: true },
 );
 
-function onSorterUpdate(sorter: DataTableSortState | DataTableSortState[] | null) {
+function onSorterUpdate(
+  sorter: DataTableSortState | DataTableSortState[] | null,
+) {
   const sortState = Array.isArray(sorter) ? sorter[0] : sorter;
   if (!sortState?.columnKey) {
     emit("update:sort", { key: "recent", order: "descend" });
@@ -101,7 +113,8 @@ const columns = computed<DataTableColumns<PortProcess>>(() => [
     type: "expand",
     width: 52,
     expandable: () => true,
-    renderExpand: (row) => h(PortDetailPanel, { item: row, isDarkTheme: props.isDarkTheme }),
+    renderExpand: (row) =>
+      h(PortDetailPanel, { item: row, isDarkTheme: props.isDarkTheme }),
   },
   {
     title: "端口",
@@ -120,18 +133,26 @@ const columns = computed<DataTableColumns<PortProcess>>(() => [
     width: 220,
     sorter: true,
     sortOrder: props.sortKey === "process" ? props.sortOrder : false,
-    ellipsis: true,
     render: (row) => {
       const tags = resolvePortTags(row);
       const children = [
-        h("span", { class: "process-name", title: row.command }, row.processName),
+        h(
+          "span",
+          { class: "process-name", title: row.command },
+          row.processName,
+        ),
       ];
 
       if (props.currentUser && row.user !== props.currentUser) {
         children.push(
           h(
             NTag,
-            { size: "tiny", bordered: false, type: "warning", class: "process-tag" },
+            {
+              size: "tiny",
+              bordered: false,
+              type: "warning",
+              class: "process-tag",
+            },
             { default: () => row.user },
           ),
         );
@@ -264,7 +285,10 @@ const columns = computed<DataTableColumns<PortProcess>>(() => [
 </script>
 
 <template>
-  <div ref="tableRootRef" :class="['table-root', { 'table-root--light': !isDarkTheme }]">
+  <div
+    ref="tableRootRef"
+    :class="['table-root', { 'table-root--light': !isDarkTheme }]"
+  >
     <n-data-table
       :columns="columns"
       :data="items"
@@ -324,37 +348,33 @@ const columns = computed<DataTableColumns<PortProcess>>(() => [
   padding-bottom: 8px;
 }
 
-.port-cell,
-.pid-cell,
-.address-cell {
+:deep(.port-cell),
+:deep(.pid-cell),
+:deep(.address-cell) {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
 
-.port-cell {
+:deep(.port-cell) {
   align-content: center;
   white-space: nowrap;
 }
 
-.port-value {
+:deep(.port-value) {
   color: #f5fbff;
-  font-family:
-    "SF Mono",
-    "JetBrains Mono",
-    "IBM Plex Mono",
-    monospace;
+  font-family: "SF Mono", "JetBrains Mono", "IBM Plex Mono", monospace;
   font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.03em;
 }
 
-.address-meta {
+:deep(.address-meta) {
   color: #6f89a7;
   font-size: 11px;
 }
 
-.process-cell {
+:deep(.process-cell) {
   display: flex;
   gap: 8px;
   align-items: center;
@@ -363,9 +383,13 @@ const columns = computed<DataTableColumns<PortProcess>>(() => [
   white-space: nowrap;
 }
 
-.process-name {
+:deep(.process-name) {
+  display: block;
   flex: 1;
+  max-width: 100%;
+  min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
   color: #edf5ff;
   text-overflow: ellipsis;
   font-size: 13px;
@@ -377,39 +401,35 @@ const columns = computed<DataTableColumns<PortProcess>>(() => [
   margin-left: 2px;
 }
 
-.pid-cell {
+:deep(.pid-cell) {
   white-space: nowrap;
 }
 
-.pid-label {
+:deep(.pid-label) {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
-.pid-value,
-.address-value,
-.uptime-cell {
-  font-family:
-    "SF Mono",
-    "JetBrains Mono",
-    "IBM Plex Mono",
-    monospace;
+:deep(.pid-value),
+:deep(.address-value),
+:deep(.uptime-cell) {
+  font-family: "SF Mono", "JetBrains Mono", "IBM Plex Mono", monospace;
   font-size: 12px;
 }
 
-.address-value {
+:deep(.address-value) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.address-cell,
-.uptime-wrap {
+:deep(.address-cell),
+:deep(.uptime-wrap) {
   min-width: 0;
   white-space: nowrap;
 }
 
-.uptime-cell {
+:deep(.uptime-cell) {
   color: #dce7f8;
 }
 
@@ -423,16 +443,16 @@ const columns = computed<DataTableColumns<PortProcess>>(() => [
   --n-td-text-color: #182c43;
 }
 
-.table-root--light .port-value,
-.table-root--light .process-name {
+.table-root--light :deep(.port-value),
+.table-root--light :deep(.process-name) {
   color: #11263d;
 }
 
-.table-root--light .address-meta {
+.table-root--light :deep(.address-meta) {
   color: #73879d;
 }
 
-.table-root--light .uptime-cell {
+.table-root--light :deep(.uptime-cell) {
   color: #2f455d;
 }
 </style>

@@ -8,7 +8,6 @@ const props = defineProps<{
   query: string;
   sortKey: SortKey;
   sortOrder: SortOrder;
-  refreshing: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -57,7 +56,12 @@ const orderLabel = computed(() => {
         </n-button>
       </n-button-group>
 
-      <n-button quaternary size="small" class="toolbar-order" @click="emit('toggle:sortOrder')">
+      <n-button
+        quaternary
+        size="small"
+        class="toolbar-order"
+        @click="emit('toggle:sortOrder')"
+      >
         {{ orderLabel }}
       </n-button>
 
@@ -65,7 +69,7 @@ const orderLabel = computed(() => {
         tertiary
         size="small"
         type="primary"
-        :loading="refreshing"
+        class="toolbar-refresh"
         @click="emit('refresh')"
       >
         刷新
@@ -96,6 +100,10 @@ const orderLabel = computed(() => {
 
 .toolbar-order {
   min-width: 96px;
+}
+
+.toolbar-refresh {
+  min-width: 80px;
 }
 
 @media (max-width: 900px) {
