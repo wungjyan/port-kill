@@ -11,6 +11,7 @@ import type {
   KillResult,
   PortListResponse,
   PortProcess,
+  ReboundCheckResult,
   SortKey,
   SortOrder,
 } from "../types";
@@ -24,7 +25,9 @@ const { isDarkTheme } = defineProps<{
   isDarkTheme: boolean;
 }>();
 
-const AUTO_REFRESH_INTERVAL_MS = 5_000;
+const AUTO_REFRESH_INTERVAL_MS = 8_000;
+const LOAD_TIMEOUT_MS = 8_000; // Slightly longer than backend timeout (5s + buffer)
+const REBOUND_CHECK_DELAY_MS = 900;
 
 const initialLoading = ref(true);
 const query = ref("");
@@ -34,8 +37,10 @@ const sortKey = ref<SortKey>("recent");
 const sortOrder = ref<SortOrder>("descend");
 const activeKillPids = ref<number[]>([]);
 const loadError = ref("");
+const lastLoadTime = ref<number>(0);
 let refreshTimer: number | null = null;
 let currentLoadPromise: Promise<void> | null = null;
+const reboundCheckTimers = new Set<number>();
 
 const defaultOrders: Record<SortKey, SortOrder> = {
   recent: "descend",
@@ -120,12 +125,34 @@ async function loadPorts(options: { silent?: boolean } = {}) {
   }
 
   currentLoadPromise = (async () => {
+    const startTime = performance.now();
+    const timeoutId = setTimeout(() => {
+      if (initialLoading.value && !silent) {
+        message.warning("端口扫描耗时较长，请稍候...");
+      }
+    }, LOAD_TIMEOUT_MS);
+
     try {
       const response = await invoke<PortListResponse>("list_ports");
       currentUser.value = response.currentUser;
       items.value = response.items;
+      clearTimeout(timeoutId);
+
+      // Track load time for performance monitoring
+      lastLoadTime.value = Math.round(performance.now() - startTime);
     } catch (error) {
+      clearTimeout(timeoutId);
       loadError.value = String(error);
+
+      // Show user-friendly error message
+      if (!silent) {
+        const errorMsg = String(error);
+        if (errorMsg.includes("timeout")) {
+          message.error("端口扫描超时，请重试");
+        } else if (errorMsg.includes("lsof")) {
+          message.error("无法执行端口扫描命令，请检查系统权限");
+        }
+      }
     } finally {
       initialLoading.value = false;
       currentLoadPromise = null;
@@ -150,8 +177,44 @@ function updateSortByTable(nextSort: { key: SortKey; order: SortOrder }) {
   sortOrder.value = nextSort.order;
 }
 
-function handleManualRefresh() {
-  void loadPorts();
+async function handleManualRefresh() {
+  await loadPorts();
+  message.success("刷新成功");
+}
+
+function buildKillSuccessMessage(item: PortProcess, force: boolean) {
+  const actionText = force ? "已强制结束" : "已结束";
+  const processLabel = item.processName ? `“${item.processName}”` : "目标进程";
+
+  return `${actionText}${processLabel}（PID ${item.pid}），端口 ${item.port} 已释放`;
+}
+
+function scheduleReboundCheck(item: PortProcess) {
+  const timerId = window.setTimeout(async () => {
+    reboundCheckTimers.delete(timerId);
+
+    try {
+      const result = await invoke<ReboundCheckResult>("check_port_rebound", {
+        port: item.port,
+        previousPid: item.pid,
+        previousProcessName: item.processName,
+      });
+
+      if (!result.rebound) {
+        return;
+      }
+
+      message.warning(
+        result.message ??
+          `端口 ${item.port} 已被重新占用，请确认是否存在自动拉起的后台服务`,
+      );
+      await loadPorts({ silent: true });
+    } catch {
+      // Ignore rebound check failures to avoid interrupting the main kill flow.
+    }
+  }, REBOUND_CHECK_DELAY_MS);
+
+  reboundCheckTimers.add(timerId);
 }
 
 async function handleKill(item: PortProcess, force: boolean) {
@@ -162,15 +225,28 @@ async function handleKill(item: PortProcess, force: boolean) {
   activeKillPids.value = [...activeKillPids.value, item.pid];
 
   try {
-    const result = await invoke<KillResult>("kill_process", {
+    await invoke<KillResult>("kill_process", {
       pid: item.pid,
       force,
     });
 
-    message.success(`${item.port} · ${result.message}`);
-    await loadPorts();
+    message.success(buildKillSuccessMessage(item, force));
+    scheduleReboundCheck(item);
+    await loadPorts({ silent: true });
   } catch (error) {
-    message.error(String(error));
+    const errorMsg = String(error);
+
+    // Provide more context in error messages
+    if (errorMsg.includes("不存在")) {
+      message.warning(`进程 ${item.pid} 已退出`);
+      await loadPorts({ silent: true }); // Refresh to update list
+    } else if (errorMsg.includes("权限")) {
+      message.error(`无权限结束进程 ${item.pid}（${item.processName}）`);
+    } else if (errorMsg.includes("未响应")) {
+      message.warning(`进程 ${item.pid} 未响应，建议使用强制结束`);
+    } else {
+      message.error(`结束失败: ${errorMsg}`);
+    }
   } finally {
     activeKillPids.value = activeKillPids.value.filter(
       (pid) => pid !== item.pid,
@@ -186,6 +262,11 @@ onBeforeUnmount(() => {
   if (refreshTimer !== null) {
     window.clearTimeout(refreshTimer);
   }
+
+  reboundCheckTimers.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+  reboundCheckTimers.clear();
 });
 </script>
 
@@ -225,6 +306,9 @@ onBeforeUnmount(() => {
           <span class="panel-subtitle">
             当前用户 {{ currentUser || "未知" }} · 共
             {{ filteredItems.length }} 条结果
+            <template v-if="lastLoadTime > 0">
+              · 加载耗时 {{ lastLoadTime }}ms
+            </template>
           </span>
         </div>
 
