@@ -7,7 +7,13 @@ import IconMoon from "./IconMoon.vue";
 import IconSun from "./IconSun.vue";
 import PortTable from "./PortTable.vue";
 import PortToolbar from "./PortToolbar.vue";
-import type { KillResult, PortListResponse, PortProcess, SortKey, SortOrder } from "../types";
+import type {
+  KillResult,
+  PortListResponse,
+  PortProcess,
+  SortKey,
+  SortOrder,
+} from "../types";
 
 defineEmits<{
   toggleTheme: [];
@@ -21,7 +27,6 @@ const { isDarkTheme } = defineProps<{
 const AUTO_REFRESH_INTERVAL_MS = 5_000;
 
 const initialLoading = ref(true);
-const refreshing = ref(false);
 const query = ref("");
 const currentUser = ref("");
 const items = ref<PortProcess[]>([]);
@@ -110,11 +115,8 @@ async function loadPorts(options: { silent?: boolean } = {}) {
   loadError.value = "";
   const silent = options.silent ?? false;
 
-  if (silent && !initialLoading.value) {
-    refreshing.value = true;
-  } else {
+  if (!silent || initialLoading.value) {
     initialLoading.value = true;
-    refreshing.value = true;
   }
 
   currentLoadPromise = (async () => {
@@ -126,7 +128,6 @@ async function loadPorts(options: { silent?: boolean } = {}) {
       loadError.value = String(error);
     } finally {
       initialLoading.value = false;
-      refreshing.value = false;
       currentLoadPromise = null;
       scheduleAutoRefresh();
     }
@@ -171,7 +172,9 @@ async function handleKill(item: PortProcess, force: boolean) {
   } catch (error) {
     message.error(String(error));
   } finally {
-    activeKillPids.value = activeKillPids.value.filter((pid) => pid !== item.pid);
+    activeKillPids.value = activeKillPids.value.filter(
+      (pid) => pid !== item.pid,
+    );
   }
 }
 
@@ -199,10 +202,18 @@ onBeforeUnmount(() => {
       <button
         class="theme-toggle"
         type="button"
-        :aria-label="isDarkTheme ? '当前为暗黑主题，点击切换到明亮主题' : '当前为明亮主题，点击切换到暗黑主题'"
+        :aria-label="
+          isDarkTheme
+            ? '当前为暗黑主题，点击切换到明亮主题'
+            : '当前为明亮主题，点击切换到暗黑主题'
+        "
         @click="$emit('toggleTheme')"
       >
-        <IconMoon v-if="isDarkTheme" class="theme-toggle-icon" aria-hidden="true" />
+        <IconMoon
+          v-if="isDarkTheme"
+          class="theme-toggle-icon"
+          aria-hidden="true"
+        />
         <IconSun v-else class="theme-toggle-icon" aria-hidden="true" />
       </button>
     </header>
@@ -212,7 +223,8 @@ onBeforeUnmount(() => {
         <div class="panel-meta">
           <span class="panel-title">Live Table</span>
           <span class="panel-subtitle">
-            当前用户 {{ currentUser || "未知" }} · 共 {{ filteredItems.length }} 条结果
+            当前用户 {{ currentUser || "未知" }} · 共
+            {{ filteredItems.length }} 条结果
           </span>
         </div>
 
@@ -220,7 +232,6 @@ onBeforeUnmount(() => {
           :query="query"
           :sort-key="sortKey"
           :sort-order="sortOrder"
-          :refreshing="refreshing"
           @update:query="query = $event"
           @update:sort-key="applySort"
           @toggle:sort-order="toggleSortOrder"
@@ -237,7 +248,9 @@ onBeforeUnmount(() => {
           <n-empty description="端口列表加载失败">
             <template #extra>
               <div class="error-message">{{ loadError }}</div>
-              <n-button type="primary" tertiary @click="handleManualRefresh">重新加载</n-button>
+              <n-button type="primary" tertiary @click="handleManualRefresh"
+                >重新加载</n-button
+              >
             </template>
           </n-empty>
         </div>
@@ -280,8 +293,16 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(82, 112, 146, 0.18);
   border-radius: 20px;
   background:
-    radial-gradient(circle at top left, rgba(63, 115, 255, 0.22), transparent 34%),
-    radial-gradient(circle at bottom right, rgba(42, 186, 132, 0.16), transparent 28%),
+    radial-gradient(
+      circle at top left,
+      rgba(63, 115, 255, 0.22),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at bottom right,
+      rgba(42, 186, 132, 0.16),
+      transparent 28%
+    ),
     linear-gradient(180deg, rgba(10, 20, 34, 0.96), rgba(7, 15, 27, 0.98));
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.2);
 }
@@ -404,9 +425,21 @@ onBeforeUnmount(() => {
 .workbench--light .hero {
   border-color: rgba(117, 145, 179, 0.22);
   background:
-    radial-gradient(circle at top left, rgba(72, 120, 235, 0.16), transparent 34%),
-    radial-gradient(circle at bottom right, rgba(44, 179, 130, 0.12), transparent 28%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(243, 248, 254, 0.98));
+    radial-gradient(
+      circle at top left,
+      rgba(72, 120, 235, 0.16),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at bottom right,
+      rgba(44, 179, 130, 0.12),
+      transparent 28%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.96),
+      rgba(243, 248, 254, 0.98)
+    );
   box-shadow: 0 18px 34px rgba(69, 94, 123, 0.08);
 }
 
