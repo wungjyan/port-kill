@@ -26,6 +26,17 @@ export type KillResult = {
   message: string;
 };
 
+export type ReboundCheckResult = {
+  port: number;
+  occupied: boolean;
+  rebound: boolean;
+  sameProcessName: boolean;
+  pid: number | null;
+  processName: string | null;
+  command: string | null;
+  message: string | null;
+};
+
 export type SortKey = "recent" | "port" | "process";
 
 export type SortOrder = "ascend" | "descend";
