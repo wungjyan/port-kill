@@ -2,8 +2,18 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::process::Command;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+// Kill process polling configuration
+const KILL_POLL_MAX_ATTEMPTS: u32 = 10;
+const KILL_POLL_INTERVALS_MS: [u64; 10] = [50, 50, 50, 100, 100, 100, 200, 200, 200, 200];
+
+// Command execution timeout configuration
+const LSOF_TIMEOUT_SECS: u64 = 5;
+const PS_TIMEOUT_SECS: u64 = 3;
+const KILL_TIMEOUT_SECS: u64 = 2;
 
 #[derive(Debug, Clone)]
 struct RawPortEntry {
@@ -51,12 +61,70 @@ struct KillResult {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReboundCheckResult {
+    port: u16,
+    occupied: bool,
+    rebound: bool,
+    same_process_name: bool,
+    pid: Option<i32>,
+    process_name: Option<String>,
+    command: Option<String>,
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ProcessContext {
+    process_name: String,
     command: String,
     cwd: Option<String>,
     started_at: Option<String>,
     started_at_ts: Option<i64>,
+}
+
+/// Execute a command with timeout
+/// Returns stdout as String on success, or error message on failure/timeout
+fn run_command_with_timeout(
+    cmd_path: &str,
+    args: &[&str],
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let (tx, rx) = mpsc::channel();
+    let cmd_path_owned = cmd_path.to_string();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+    // Spawn command execution in a separate thread
+    thread::spawn(move || {
+        let result = Command::new(&cmd_path_owned)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("failed to spawn {}: {}", cmd_path_owned, e))
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    Err(if stderr.is_empty() {
+                        format!("{} returned non-zero status", cmd_path_owned)
+                    } else {
+                        stderr
+                    })
+                }
+            });
+        let _ = tx.send(result);
+    });
+
+    // Wait for result with timeout
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(result) => result,
+        Err(_) => Err(format!("{} execution timeout ({}s)", cmd_path, timeout_secs)),
+    }
+}
+
+/// Helper: run command and convert Result to Option, silently ignoring errors
+fn run_command_optional(cmd_path: &str, args: &[&str], timeout_secs: u64) -> Option<String> {
+    run_command_with_timeout(cmd_path, args, timeout_secs).ok()
 }
 
 #[tauri::command]
@@ -68,6 +136,7 @@ fn list_ports() -> Result<PortListResponse, String> {
     for entry in raw_entries {
         let key = format!("{}:{}:{}", entry.pid, entry.protocol, entry.port);
         let context = contexts.get(&entry.pid).cloned().unwrap_or(ProcessContext {
+            process_name: entry.process_name.clone(),
             command: entry.process_name.clone(),
             cwd: None,
             started_at: None,
@@ -76,7 +145,7 @@ fn list_ports() -> Result<PortListResponse, String> {
 
         let item = grouped.entry(key).or_insert_with(|| PortProcess {
             pid: entry.pid,
-            process_name: entry.process_name.clone(),
+            process_name: context.process_name.clone(),
             user: entry.user.clone(),
             protocol: entry.protocol.clone(),
             port: entry.port,
@@ -130,15 +199,25 @@ fn kill_process(pid: i32, force: Option<bool>) -> Result<KillResult, String> {
         return Err("无效的 PID".to_string());
     }
 
+    // Verify process exists before attempting to kill
+    if !process_exists(pid) {
+        return Err(format!("进程 {pid} 不存在"));
+    }
+
     let force = force.unwrap_or(false);
     let signal = if force { "-KILL" } else { "-TERM" };
-    let output = Command::new("/bin/kill")
-        .args([signal, &pid.to_string()])
-        .output()
-        .map_err(|error| format!("failed to execute kill: {error}"))?;
 
-    if output.status.success() {
-        for _ in 0..10 {
+    // Execute kill command with timeout
+    let result = run_command_with_timeout(
+        "/bin/kill",
+        &[signal, &pid.to_string()],
+        KILL_TIMEOUT_SECS,
+    );
+
+    // Check if kill command succeeded
+    if result.is_ok() {
+        // Poll with progressive delays: faster checks initially, slower later
+        for attempt in 0..KILL_POLL_MAX_ATTEMPTS {
             if !process_exists(pid) {
                 return Ok(KillResult {
                     pid,
@@ -148,7 +227,8 @@ fn kill_process(pid: i32, force: Option<bool>) -> Result<KillResult, String> {
                 });
             }
 
-            thread::sleep(Duration::from_millis(120));
+            let delay_ms = KILL_POLL_INTERVALS_MS[attempt as usize];
+            thread::sleep(Duration::from_millis(delay_ms));
         }
 
         return Err(if force {
@@ -158,26 +238,103 @@ fn kill_process(pid: i32, force: Option<bool>) -> Result<KillResult, String> {
         });
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    // Kill command failed, normalize the error message
+    let stderr = result.unwrap_err();
     Err(normalize_kill_error(pid, &stderr))
 }
 
-fn list_raw_ports() -> Result<Vec<RawPortEntry>, String> {
-    let output = Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcLnPTu"])
-        .output()
-        .map_err(|error| format!("failed to execute lsof: {error}"))?;
+#[tauri::command]
+fn check_port_rebound(
+    port: u16,
+    previous_pid: i32,
+    previous_process_name: String,
+) -> Result<ReboundCheckResult, String> {
+    if port == 0 {
+        return Err("无效的端口".to_string());
+    }
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "lsof returned a non-zero status".to_string()
-        } else {
-            stderr
+    let mut entries = list_raw_ports()?
+        .into_iter()
+        .filter(|entry| entry.port == port)
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        return Ok(ReboundCheckResult {
+            port,
+            occupied: false,
+            rebound: false,
+            same_process_name: false,
+            pid: None,
+            process_name: None,
+            command: None,
+            message: None,
         });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    entries.sort_by(|left, right| left.pid.cmp(&right.pid));
+
+    let contexts = load_process_contexts(&entries);
+    let matched_entry = entries
+        .iter()
+        .find(|entry| entry.pid != previous_pid && process_name_matches(&entry.process_name, &previous_process_name))
+        .or_else(|| entries.iter().find(|entry| entry.pid != previous_pid))
+        .or_else(|| entries.first());
+
+    let Some(entry) = matched_entry else {
+        return Ok(ReboundCheckResult {
+            port,
+            occupied: false,
+            rebound: false,
+            same_process_name: false,
+            pid: None,
+            process_name: None,
+            command: None,
+            message: None,
+        });
+    };
+
+    let context = contexts.get(&entry.pid);
+    let process_name = context
+        .map(|item| item.process_name.clone())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| entry.process_name.clone());
+    let same_process_name = process_name_matches(&process_name, &previous_process_name)
+        || process_name_matches(&entry.process_name, &previous_process_name);
+    let rebound = entry.pid != previous_pid;
+    let command = context
+        .map(|item| item.command.clone())
+        .filter(|value| !value.is_empty());
+    let message = if same_process_name {
+        Some(format!(
+            "端口 {port} 已被重新监听，当前仍是“{process_name}”（PID {}），可能由后台服务自动拉起",
+            entry.pid
+        ))
+    } else {
+        Some(format!(
+            "端口 {port} 已被重新占用，当前进程为“{process_name}”（PID {}）",
+            entry.pid
+        ))
+    };
+
+    Ok(ReboundCheckResult {
+        port,
+        occupied: true,
+        rebound,
+        same_process_name,
+        pid: Some(entry.pid),
+        process_name: Some(process_name),
+        command,
+        message,
+    })
+}
+
+fn list_raw_ports() -> Result<Vec<RawPortEntry>, String> {
+    let stdout = run_command_with_timeout(
+        "/usr/sbin/lsof",
+        &["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcLnPTu"],
+        LSOF_TIMEOUT_SECS,
+    )?;
+
     let mut pid: Option<i32> = None;
     let mut process_name = String::new();
     let mut user = String::new();
@@ -263,80 +420,132 @@ fn load_process_contexts(entries: &[RawPortEntry]) -> HashMap<i32, ProcessContex
     pids.sort();
     pids.dedup();
 
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+
+    // Batch load process info using a single ps command
+    let ps_data = load_process_info_batch(&pids);
+
+    // Load cwd for each process (still needs individual lsof calls)
     pids.into_iter()
         .map(|pid| {
-            let command = load_process_command(pid).unwrap_or_default();
-            let started_at = load_process_started_at(pid);
+            let (command, started_at, started_at_ts) = ps_data
+                .get(&pid)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), None, None));
+
+            let process_name = derive_process_name(&command).unwrap_or_default();
             let cwd = load_process_cwd(pid);
-            let ts = started_at
-                .as_deref()
-                .and_then(parse_ps_lstart_to_sortable_value);
 
             (
                 pid,
                 ProcessContext {
+                    process_name,
                     command,
                     cwd,
                     started_at,
-                    started_at_ts: ts,
+                    started_at_ts,
                 },
             )
         })
         .collect()
 }
 
-fn load_process_command(pid: i32) -> Option<String> {
-    let output = Command::new("/bin/ps")
-        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
+/// Batch load process command and start time for multiple PIDs
+/// Returns HashMap<pid, (command, started_at, started_at_ts)>
+fn load_process_info_batch(pids: &[i32]) -> HashMap<i32, (String, Option<String>, Option<i64>)> {
+    if pids.is_empty() {
+        return HashMap::new();
     }
 
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
+    // Build comma-separated PID list for ps command
+    let pid_list = pids
+        .iter()
+        .map(|pid| pid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Execute single ps command to get all process info
+    let stdout = match run_command_with_timeout(
+        "/bin/ps",
+        &["-ww", "-o", "pid=,lstart=,command=", "-p", &pid_list],
+        PS_TIMEOUT_SECS,
+    ) {
+        Ok(output) => output,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut result = HashMap::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Parse line format: "PID  Mon Jan 15 14:23:45 2024  /path/to/command args"
+        // PID is right-aligned in a field, followed by lstart (5 tokens), then command
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 7 {
+            continue;
+        }
+
+        // Extract PID (first token)
+        let pid = match parts[0].parse::<i32>() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Extract lstart (next 5 tokens: weekday, month, day, time, year)
+        let started_at = parts[1..6].join(" ");
+        let started_at_ts = parse_ps_lstart_to_sortable_value(&started_at);
+
+        // Extract command (remaining tokens)
+        let command = parts[6..].join(" ");
+
+        result.insert(
+            pid,
+            (
+                command,
+                Some(started_at),
+                started_at_ts,
+            ),
+        );
     }
+
+    result
 }
 
-fn load_process_started_at(pid: i32) -> Option<String> {
-    let output = Command::new("/bin/ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
+fn derive_process_name(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
         return None;
     }
 
-    let value = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
+    if let Some((name, _)) = trimmed.split_once(" --") {
+        let candidate = name.trim();
+        if !candidate.is_empty() {
+            return Some(candidate.to_string());
+        }
     }
+
+    trimmed
+        .split_whitespace()
+        .next()
+        .map(|token| token.rsplit('/').next().unwrap_or(token).to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn load_process_cwd(pid: i32) -> Option<String> {
-    let output = Command::new("/usr/sbin/lsof")
-        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-        .output()
-        .ok()?;
+    let stdout = run_command_optional(
+        "/usr/sbin/lsof",
+        &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"],
+        LSOF_TIMEOUT_SECS,
+    )?;
 
-    if !output.status.success() {
-        return None;
-    }
-
-    output
-        .stdout
+    stdout
+        .as_bytes()
         .split(|byte| *byte == b'\n')
         .find_map(|line| {
             let text = String::from_utf8_lossy(line);
@@ -378,11 +587,7 @@ fn current_username() -> String {
 }
 
 fn process_exists(pid: i32) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    run_command_optional("/bin/kill", &["-0", &pid.to_string()], KILL_TIMEOUT_SECS).is_some()
 }
 
 fn normalize_kill_error(pid: i32, stderr: &str) -> String {
@@ -399,6 +604,13 @@ fn normalize_kill_error(pid: i32, stderr: &str) -> String {
     } else {
         stderr.to_string()
     }
+}
+
+fn process_name_matches(current: &str, expected: &str) -> bool {
+    let current = current.trim();
+    let expected = expected.trim();
+
+    !current.is_empty() && !expected.is_empty() && current.eq_ignore_ascii_case(expected)
 }
 
 fn parse_name_field(value: &str) -> Option<(String, u16)> {
@@ -455,7 +667,11 @@ fn parse_ps_lstart_to_sortable_value(value: &str) -> Option<i64> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![list_ports, kill_process])
+        .invoke_handler(tauri::generate_handler![
+            list_ports,
+            kill_process,
+            check_port_rebound
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
