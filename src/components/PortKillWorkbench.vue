@@ -271,13 +271,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div :class="['workbench', { 'workbench--light': !isDarkTheme }]">
-    <header class="hero">
+  <div
+    :class="['workbench', { 'workbench--light': !isDarkTheme }]"
+    data-tauri-drag-region
+  >
+    <header class="hero" data-tauri-drag-region>
       <div class="hero-main">
-        <h1 class="hero-title">端口占用管理工具</h1>
-        <p class="hero-desc">
-          扫描当前机器正在监听的端口与进程信息，支持按端口、进程和启动时间快速筛选，并可直接结束或强制结束目标进程。
-        </p>
+        <h1 class="hero-title">Port Kill</h1>
+        <p class="hero-desc">轻量端口管理工具</p>
       </div>
 
       <button
@@ -365,6 +366,7 @@ onBeforeUnmount(() => {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
   height: 100%;
+  padding-top: 30px;
   min-height: 0;
 }
 
@@ -372,7 +374,7 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  align-items: flex-start;
+  align-items: center;
   padding: 14px 18px;
   border: 1px solid rgba(82, 112, 146, 0.18);
   border-radius: 20px;

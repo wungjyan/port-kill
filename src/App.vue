@@ -132,7 +132,7 @@ function toggleTheme() {
 
 .app-shell {
   height: 100vh;
-  padding: 14px;
+  padding: 0 14px 14px;
   overflow: hidden;
   color: #eaf1fb;
   background:
