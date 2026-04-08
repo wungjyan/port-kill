@@ -95,18 +95,66 @@ jobs:
           console.log(`Release version ${expectedVersion} verified.`);
           EOF
 
+      - name: Load release notes from CHANGELOG.md
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+
+          const tag = process.env.GITHUB_REF_NAME;
+          const version = tag.replace(/^v/, '');
+          const lines = fs.readFileSync('CHANGELOG.md', 'utf8').split(/\r?\n/);
+
+          let startIndex = -1;
+          let endIndex = lines.length;
+
+          for (let i = 0; i < lines.length; i += 1) {
+            const line = lines[i];
+            if (line.startsWith('## ')) {
+              const heading = line.slice(3).trim();
+              if (startIndex === -1) {
+                const matchesVersion =
+                  heading === version ||
+                  heading.startsWith(`${version} `) ||
+                  heading === `[${version}]` ||
+                  heading.startsWith(`[${version}] `);
+
+                if (matchesVersion) {
+                  startIndex = i;
+                }
+              } else {
+                endIndex = i;
+                break;
+              }
+            }
+          }
+
+          if (startIndex === -1) {
+            throw new Error(`Unable to find release notes for version ${version} in CHANGELOG.md`);
+          }
+
+          const notes = lines.slice(startIndex, endIndex).join('\n').trim();
+          const releaseBody = [
+            notes,
+            '',
+            '## 下载说明',
+            '',
+            '- `dmg` 文件适合大多数用户直接下载安装。',
+            '- `app.tar.gz` 为压缩后的应用包，适合手动解压使用。',
+            '- 本次 Release 同时包含 Apple Silicon 和 Intel 两种 macOS 架构产物。',
+          ].join('\n');
+
+          fs.appendFileSync(
+            process.env.GITHUB_ENV,
+            `RELEASE_BODY<<EOF\n${releaseBody}\nEOF\n`
+          );
+          EOF
+
       - name: Build and publish release assets
         uses: tauri-apps/tauri-action@v0
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Port Kill ${{ github.ref_name }}
-          releaseBody: |
-            ## 下载说明
-
-            - `dmg` 文件适合大多数用户直接下载安装。
-            - `app.tar.gz` 为压缩后的应用包，适合手动解压使用。
-            - 本次 Release 同时包含 Apple Silicon 和 Intel 两种 macOS 架构产物。
-          generateReleaseNotes: true
+          releaseBody: ${{ env.RELEASE_BODY }}
           prerelease: false
           tauriScript: pnpm tauri
           args: --target ${{ matrix.rust_target }}
