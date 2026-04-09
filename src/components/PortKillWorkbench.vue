@@ -3,8 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { NButton, NEmpty, NSpin, useMessage } from "naive-ui";
 
-import IconMoon from "./IconMoon.vue";
-import IconSun from "./IconSun.vue";
+import { SunIcon, MoonIcon } from "@lucide/vue";
 import PortTable from "./PortTable.vue";
 import PortToolbar from "./PortToolbar.vue";
 import type {
@@ -291,12 +290,8 @@ onBeforeUnmount(() => {
         "
         @click="$emit('toggleTheme')"
       >
-        <IconMoon
-          v-if="isDarkTheme"
-          class="theme-toggle-icon"
-          aria-hidden="true"
-        />
-        <IconSun v-else class="theme-toggle-icon" aria-hidden="true" />
+        <MoonIcon v-if="isDarkTheme" :size="18" aria-hidden="true" />
+        <SunIcon v-else :size="18" aria-hidden="true" />
       </button>
     </header>
 
@@ -444,11 +439,6 @@ onBeforeUnmount(() => {
 .theme-toggle:focus-visible {
   outline: 2px solid rgba(75, 127, 255, 0.5);
   outline-offset: 2px;
-}
-
-.theme-toggle-icon {
-  width: 18px;
-  height: 18px;
 }
 
 .panel {

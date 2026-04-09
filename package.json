@@ -11,6 +11,7 @@
     "version:set": "node scripts/bump-version.mjs"
   },
   "dependencies": {
+    "@lucide/vue": "^1.7.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "naive-ui": "^2.44.1",
