@@ -27,22 +27,27 @@ Run in development mode (starts both Vite dev server and Tauri):
 pnpm tauri dev
 ```
 
+Frontend dev server only (no Tauri shell):
+```bash
+pnpm dev
+```
+
 Build for production:
 ```bash
-pnpm build          # Build frontend
+pnpm build          # Build frontend (includes vue-tsc --noEmit type check)
 pnpm tauri build    # Build Tauri app bundle
 ```
 
-Type checking (frontend):
+Sync version across all config files:
 ```bash
-pnpm build          # Runs vue-tsc --noEmit before vite build
+pnpm version:set   # Runs scripts/bump-version.mjs
 ```
 
 ## Architecture
 
 ### Tauri Commands (Rust → Frontend)
 
-Two main commands exposed via `#[tauri::command]`:
+Three commands exposed via `#[tauri::command]`:
 
 1. **`list_ports()`** - Returns `PortListResponse`
    - Executes `lsof -nP -iTCP -sTCP:LISTEN -F pcLnPTu` to get raw port data
@@ -54,6 +59,9 @@ Two main commands exposed via `#[tauri::command]`:
    - Sends `-TERM` (default) or `-KILL` (force) signal
    - Polls for up to 1.2 seconds to verify process termination
    - Returns normalized error messages in Chinese
+
+3. **`check_port_rebound(port: u16)`** - Returns rebound status
+   - Called after `kill_process` to detect if a new process has re-claimed the port (e.g., hot-reload, supervisor restart)
 
 ### Data Flow
 
@@ -92,7 +100,17 @@ Frontend (Vue 3)
 
 **Theme system**: Custom theme overrides are defined in App.vue for both dark and light modes, with specific colors for DataTable, Input, and Card components.
 
-**Auto-refresh**: Default interval is 5 seconds, managed in PortKillWorkbench.vue.
+**Auto-refresh**: Default interval is 8 seconds (`AUTO_REFRESH_INTERVAL_MS = 8_000`), managed in PortKillWorkbench.vue.
+
+### When Modifying
+
+**Backend (Rust)**: Preserve the aggregation key (`pid + protocol + port`), timeout controls on system commands, and Chinese error message style. Only scan `TCP LISTEN` — do not expand to UDP or established connections unless explicitly requested.
+
+**Frontend**: Keep state management centralized in PortKillWorkbench.vue. The `src/types.ts` types must stay in sync with Rust return structures — if you change a Tauri command's return shape, update both sides. Search matches across port, PID, process name, command, cwd, and listen address summaries.
+
+### Verification
+
+After changes, always type-check with `pnpm build`. For behavioral changes, manually verify in `pnpm tauri dev`: port list loads, search/sort works, kill flows complete, port rebound prompt appears, and both themes render correctly.
 
 ## Tauri Configuration
 
