@@ -14,8 +14,9 @@ export function normalizeVersion(input) {
   return input.replace(/^v/, "");
 }
 
-// Writes the given version into package.json, tauri.conf.json, and Cargo.toml.
-// Throws on invalid input or an unparseable Cargo.toml. Returns the normalized version.
+// Writes the given version into package.json, tauri.conf.json, Cargo.toml, and
+// the crate's own entry in Cargo.lock. Throws on invalid input or an unparseable
+// Cargo.toml. Returns the normalized version.
 export function setVersion(rawVersion) {
   const nextVersion = normalizeVersion(rawVersion);
 
@@ -33,6 +34,7 @@ export function setVersion(rawVersion) {
   const packageJsonPath = path.join(rootDir, "package.json");
   const tauriConfigPath = path.join(rootDir, "src-tauri", "tauri.conf.json");
   const cargoTomlPath = path.join(rootDir, "src-tauri", "Cargo.toml");
+  const cargoLockPath = path.join(rootDir, "src-tauri", "Cargo.lock");
 
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
   packageJson.version = nextVersion;
@@ -57,6 +59,33 @@ export function setVersion(rawVersion) {
 
   if (updatedCargoToml !== cargoToml) {
     fs.writeFileSync(cargoTomlPath, updatedCargoToml);
+  }
+
+  // Keep the crate's own version in Cargo.lock in sync so the committed tree is
+  // consistent. Cargo always writes `name` immediately before `version`, so we
+  // target the port-kill package block specifically.
+  if (fs.existsSync(cargoLockPath)) {
+    const packageName = packageJson.name ?? "port-kill";
+    const escapedName = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const cargoLock = fs.readFileSync(cargoLockPath, "utf8");
+    const lockVersionPattern = new RegExp(
+      `(\\[\\[package\\]\\]\\nname = "${escapedName}"\\nversion = ")([^"]+)(")`,
+    );
+
+    if (!lockVersionPattern.test(cargoLock)) {
+      throw new Error(
+        `Failed to locate "${packageName}" package version in src-tauri/Cargo.lock`,
+      );
+    }
+
+    const updatedCargoLock = cargoLock.replace(
+      lockVersionPattern,
+      `$1${nextVersion}$3`,
+    );
+
+    if (updatedCargoLock !== cargoLock) {
+      fs.writeFileSync(cargoLockPath, updatedCargoLock);
+    }
   }
 
   return nextVersion;
