@@ -1,2 +1,8 @@
 allowBuilds:
-  esbuild: true
+  esbuild: set this to true or false
+supportedArchitectures:
+  os:
+    - darwin
+  cpu:
+    - x64
+    - arm64
