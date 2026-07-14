@@ -87,7 +87,7 @@ pnpm version:set
 当前暴露的核心 Tauri commands 包括：
 
 - `list_ports`：扫描 `TCP LISTEN` 端口，聚合进程信息并返回给前端
-- `kill_process`：发送 `TERM` 或 `KILL` 信号，并轮询确认退出
+- `kill_process`：复核 PID、端口、用户与启动时间后发送 `TERM` 或 `KILL` 信号，并轮询确认退出
 - `check_port_rebound`：检查端口是否被新的进程重新占用
 
 修改后端时请注意：
@@ -99,7 +99,7 @@ pnpm version:set
 
 ## 关键前端行为
 
-- 默认自动刷新间隔当前为 `8s`，定义在 `src/components/PortKillWorkbench.vue`
+- 默认自动刷新间隔当前为 `10s`，定义在 `src/components/PortKillWorkbench.vue`
 - 首次加载、手动刷新、静默刷新、kill 后刷新、端口回弹检查都由 `PortKillWorkbench.vue` 协调
 - 排序支持最近启动时间、端口、进程名
 - 搜索会匹配端口、PID、进程名、命令、工作目录、监听地址摘要

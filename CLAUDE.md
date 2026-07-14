@@ -38,9 +38,22 @@ pnpm build          # Build frontend (includes vue-tsc --noEmit type check)
 pnpm tauri build    # Build Tauri app bundle
 ```
 
-Sync version across all config files:
+Sync version across all config files (writes `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`):
 ```bash
-pnpm version:set   # Runs scripts/bump-version.mjs
+pnpm version:set <version>   # e.g. pnpm version:set 0.1.4 — runs scripts/bump-version.mjs
+```
+
+Cut a release (dates the CHANGELOG, syncs the version, commits, tags — push is opt-in):
+```bash
+pnpm release <version> --dry-run   # preview the extracted release notes, no changes
+pnpm release <version>             # rewrite CHANGELOG + version sync + commit + tag (local)
+pnpm release <version> --push      # also push branch + tag, triggering the GitHub Actions build
+```
+
+Rust checks (backend logic has unit tests in `src-tauri/src/lib.rs`):
+```bash
+cargo test   --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
 ## Architecture
@@ -55,7 +68,8 @@ Three commands exposed via `#[tauri::command]`:
    - Groups by `pid:protocol:port` to aggregate multiple listening addresses
    - Returns sorted by `started_at_ts` (most recent first), then port, then process name
 
-2. **`kill_process(pid: i32, force: Option<bool>)`** - Returns `KillResult`
+2. **`kill_process(pid, force, expected_port, expected_started_at_ts, expected_process_name, expected_user)`** - Returns `KillResult`
+   - Revalidates process identity and ownership before sending a signal
    - Sends `-TERM` (default) or `-KILL` (force) signal
    - Polls for up to 1.2 seconds to verify process termination
    - Returns normalized error messages in Chinese
@@ -79,7 +93,8 @@ Frontend (Vue 3)
 
 ### Frontend Structure
 
-- **App.vue**: Theme provider with custom Naive UI overrides for dark/light modes
+- **App.vue**: Theme provider — reads/persists the user's theme preference, follows the system on first run, and wires the overrides into `NConfigProvider`
+- **src/styles/naiveTheme.ts**: `darkThemeOverrides` / `lightThemeOverrides` — the actual Naive UI color/token overrides for both modes
 - **PortKillWorkbench.vue**: Main container, manages state (port list, selected process, auto-refresh)
 - **PortTable.vue**: Displays port data using Naive UI DataTable, handles sorting/filtering
 - **PortToolbar.vue**: Search input, sort controls, refresh button, theme toggle
@@ -98,15 +113,15 @@ Frontend (Vue 3)
 
 **Start time parsing**: `ps -o lstart=` output (e.g., "Mon Jan 15 14:23:45 2024") is parsed into a sortable integer timestamp (`started_at_ts`) for sorting by recency.
 
-**Theme system**: Custom theme overrides are defined in App.vue for both dark and light modes, with specific colors for DataTable, Input, and Card components.
+**Theme system**: Theme overrides live in `src/styles/naiveTheme.ts` (`darkThemeOverrides` / `lightThemeOverrides`), with specific colors for DataTable, Input, and Card components. App.vue selects between them, persists the choice to `localStorage` (`port-kill.theme`), and defaults to the OS preference when unset.
 
-**Auto-refresh**: Default interval is 8 seconds (`AUTO_REFRESH_INTERVAL_MS = 8_000`), managed in PortKillWorkbench.vue.
+**Auto-refresh**: Managed in PortKillWorkbench.vue. Users can toggle auto-refresh on/off and pick an interval in the settings panel; the default is 10 seconds (`DEFAULT_REFRESH_INTERVAL_MS = 10_000`), and both preferences are persisted to `localStorage`.
 
 ### When Modifying
 
 **Backend (Rust)**: Preserve the aggregation key (`pid + protocol + port`), timeout controls on system commands, and Chinese error message style. Only scan `TCP LISTEN` — do not expand to UDP or established connections unless explicitly requested.
 
-**Frontend**: Keep state management centralized in PortKillWorkbench.vue. The `src/types.ts` types must stay in sync with Rust return structures — if you change a Tauri command's return shape, update both sides. Search matches across port, PID, process name, command, cwd, and listen address summaries.
+**Frontend**: Keep state management centralized in PortKillWorkbench.vue. The `src/types.ts` types must stay in sync with Rust return structures — if you change a Tauri command's return shape, update both sides. Rust structs use `#[serde(rename_all = "camelCase")]`, so snake_case fields (e.g. `started_at_ts`) arrive as camelCase (`startedAtTs`) on the frontend. Search matches across port, PID, process name, command, cwd, and listen address summaries.
 
 ### Verification
 
@@ -124,9 +139,14 @@ After changes, always type-check with `pnpm build`. For behavioral changes, manu
 Frontend:
 - Vue 3.5+ with TypeScript
 - Naive UI 2.44+ (component library)
+- @lucide/vue (icons — replaced the earlier custom icon components)
 - Vite 6+ (build tool)
 
 Backend:
 - Tauri 2
 - serde + serde_json (serialization)
-- tauri-plugin-opener (open URLs)
+
+## Reference Docs
+
+- `docs/frontend-api.md` — full reference for the three Tauri commands: request params, return field shapes (camelCase), and which UI scenarios call each. Read this before changing a command's return shape or the frontend that consumes it.
+- `docs/releasing.md` — release checklist: keep `CHANGELOG.md`'s `## Unreleased` section filled during development, then `pnpm release <version>` dates it, syncs the version, commits, and tags. Pre-release verification (build, `cargo test`, `cargo clippy`, `tauri build`) and the tag-triggered GitHub Actions flow (`.github/workflows/release.yml`) that builds Apple Silicon + Intel bundles. `release.mjs` fails early if `Unreleased` is empty or versions/tags disagree, so mismatches never reach CI.
