@@ -23,6 +23,24 @@ Port Kill 是一款面向开发场景的 macOS 桌面工具，用于扫描本机
 
 当前后端固定调用 macOS 的 `/usr/sbin/lsof`、`/bin/ps` 和 `/bin/kill`，因此不支持 Linux 或 Windows。应用只扫描 `TCP LISTEN`，不包含 UDP 或已建立连接。
 
+### 安装包提示“已损坏，无法打开”？
+
+当前发行版尚未完成 Apple 公证。从浏览器下载后，macOS 会为应用添加隔离标记；当 Gatekeeper 无法完成来源验证时，可能会显示“已损坏，无法打开”的提示。这类提示反映的是系统的验证状态，不等同于安装包或应用文件实际损坏。
+
+安装时先将 `Port Kill.app` 拖入“应用程序”目录，然后打开“终端”执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Port Kill.app"
+```
+
+如果第一条命令提示权限不足，可改用：
+
+```bash
+sudo xattr -dr com.apple.quarantine "/Applications/Port Kill.app"
+```
+
+该操作会移除 macOS 为下载项添加的隔离标记。出于安全考虑，请仅对从本项目 GitHub Releases 获取的安装包执行。
+
 ## 安全边界
 
 - 只允许结束当前用户所属的进程，系统进程和其他用户进程不可操作。
