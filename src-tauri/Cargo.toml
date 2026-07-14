@@ -1,6 +1,6 @@
 [package]
 name = "port-kill"
-version = "0.1.3"
+version = "0.1.4"
 description = "A macOS TCP listening port and process manager"
 authors = ["wungjyan"]
 edition = "2021"
