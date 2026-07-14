@@ -5,18 +5,68 @@ body,
   height: 100%;
 }
 
+:root {
+  color-scheme: light dark;
+  --font-sans: "SF Pro Text", "SF Pro Display", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace,
+    monospace;
+  --radius-xs: 5px;
+  --radius-sm: 7px;
+  --radius-md: 9px;
+  --radius-lg: 12px;
+  --app-bg: #f2f2f4;
+  --app-chrome: rgba(247, 247, 249, 0.92);
+  --app-panel: #ffffff;
+  --app-panel-subtle: #f6f7f9;
+  --app-row-hover: #f5f6f8;
+  --app-text: #1d1d1f;
+  --app-text-muted: #616770;
+  --app-text-faint: #8b919b;
+  --app-border: rgba(60, 60, 67, 0.13);
+  --app-border-strong: rgba(60, 60, 67, 0.2);
+  --app-accent: #0071e3;
+  --app-accent-soft: rgba(0, 113, 227, 0.1);
+  --app-warning: #bf6a02;
+  --app-danger: #d70015;
+  --app-danger-soft: rgba(215, 0, 21, 0.08);
+  --app-success: #248a3d;
+  --shadow-window: 0 22px 60px rgba(0, 0, 0, 0.14);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --app-bg: #1f2329;
+  --app-chrome: rgba(43, 48, 56, 0.92);
+  --app-panel: #252a31;
+  --app-panel-subtle: #2a3038;
+  --app-row-hover: #2c333c;
+  --app-text: #f3f4f6;
+  --app-text-muted: #b3bac5;
+  --app-text-faint: #858d99;
+  --app-border: rgba(255, 255, 255, 0.1);
+  --app-border-strong: rgba(255, 255, 255, 0.16);
+  --app-accent: #0a84ff;
+  --app-accent-soft: rgba(10, 132, 255, 0.16);
+  --app-warning: #ff9f0a;
+  --app-danger: #ff453a;
+  --app-danger-soft: rgba(255, 69, 58, 0.13);
+  --app-success: #30d158;
+  --shadow-window: 0 22px 70px rgba(0, 0, 0, 0.35);
+}
+
 body {
   margin: 0;
   overflow: hidden;
-  background: #07111f;
-  color: #e5eefb;
-  font-family:
-    "IBM Plex Sans",
-    "SF Pro Display",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
 }
 
 * {
@@ -28,4 +78,12 @@ input,
 textarea,
 select {
   font: inherit;
+}
+
+button {
+  letter-spacing: 0;
+}
+
+code {
+  font-family: var(--font-mono);
 }

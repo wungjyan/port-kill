@@ -81,6 +81,32 @@ export function formatIpSummary(item: PortProcess): string {
   return item.ipVersions[0] ?? "TCP";
 }
 
+export function resolveExposure(item: PortProcess): {
+  label: string;
+  tone: "local" | "limited" | "public";
+} {
+  const normalizedHosts = item.hosts.map((host) => host.toLowerCase());
+  const listensOnAllInterfaces = normalizedHosts.some((host) =>
+    ["*", "0.0.0.0", "[::]", "::"].includes(host),
+  );
+
+  if (listensOnAllInterfaces) {
+    return { label: "所有网卡", tone: "public" };
+  }
+
+  const loopbackOnly =
+    normalizedHosts.length > 0 &&
+    normalizedHosts.every((host) =>
+      ["127.0.0.1", "localhost", "[::1]", "::1"].includes(host),
+    );
+
+  if (loopbackOnly) {
+    return { label: "仅本机", tone: "local" };
+  }
+
+  return { label: "指定地址", tone: "limited" };
+}
+
 export function getRowKey(item: PortProcess): string {
   return `${item.pid}:${item.port}:${item.protocol}`;
 }

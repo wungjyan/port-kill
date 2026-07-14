@@ -8,12 +8,12 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "version:set": "node scripts/bump-version.mjs"
+    "version:set": "node scripts/bump-version.mjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "@lucide/vue": "^1.7.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "naive-ui": "^2.44.1",
     "vue": "^3.5.13"
   },

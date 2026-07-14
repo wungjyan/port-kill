@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch, watchEffect } from "vue";
 import {
   NConfigProvider,
   NGlobalStyle,
@@ -10,90 +10,27 @@ import {
 } from "naive-ui";
 
 import PortKillWorkbench from "./components/PortKillWorkbench.vue";
+import {
+  darkThemeOverrides,
+  lightThemeOverrides,
+} from "./styles/naiveTheme";
 
-const isDarkTheme = ref(true);
+const THEME_STORAGE_KEY = "port-kill.theme";
 
-const darkThemeOverrides: GlobalThemeOverrides = {
-  common: {
-    bodyColor: "#07111f",
-    cardColor: "#0c1828",
-    modalColor: "#0f1d31",
-    popoverColor: "#0f1d31",
-    tableColor: "#091423",
-    textColorBase: "#eaf1fb",
-    textColor1: "#eaf1fb",
-    textColor2: "#93a9c5",
-    textColor3: "#6f86a2",
-    borderColor: "rgba(91, 119, 149, 0.18)",
-    primaryColor: "#4b7fff",
-    primaryColorHover: "#5f90ff",
-    primaryColorPressed: "#3866d0",
-    successColor: "#2bbf8a",
-    warningColor: "#f0a441",
-    errorColor: "#ff6b78",
-    fontFamily:
-      '"IBM Plex Sans", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    fontFamilyMono:
-      '"SF Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace',
-  },
-  DataTable: {
-    thColor: "rgba(10, 21, 36, 0.94)",
-    tdColor: "transparent",
-    tdColorHover: "rgba(31, 52, 81, 0.75)",
-    borderColor: "rgba(91, 119, 149, 0.16)",
-  },
-  Input: {
-    color: "rgba(11, 23, 39, 0.92)",
-    colorFocus: "rgba(11, 23, 39, 0.96)",
-    borderHover: "1px solid rgba(92, 128, 175, 0.5)",
-    boxShadowFocus: "0 0 0 2px rgba(75, 127, 255, 0.16)",
-  },
-  Card: {
-    colorEmbedded: "rgba(10, 20, 34, 0.8)",
-    borderColor: "rgba(91, 119, 149, 0.14)",
-  },
-};
+function loadInitialTheme() {
+  if (typeof window === "undefined") {
+    return true;
+  }
 
-const lightThemeOverrides: GlobalThemeOverrides = {
-  common: {
-    bodyColor: "#f3f7fc",
-    cardColor: "#ffffff",
-    modalColor: "#ffffff",
-    popoverColor: "#ffffff",
-    tableColor: "#ffffff",
-    textColorBase: "#11233a",
-    textColor1: "#11233a",
-    textColor2: "#51657d",
-    textColor3: "#6f8095",
-    borderColor: "rgba(70, 98, 129, 0.16)",
-    primaryColor: "#356dff",
-    primaryColorHover: "#5887ff",
-    primaryColorPressed: "#2452c9",
-    successColor: "#21a97a",
-    warningColor: "#e0932b",
-    errorColor: "#d95a65",
-    fontFamily:
-      '"IBM Plex Sans", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    fontFamilyMono:
-      '"SF Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace',
-  },
-  DataTable: {
-    thColor: "rgba(241, 246, 252, 0.98)",
-    tdColor: "transparent",
-    tdColorHover: "rgba(226, 236, 248, 0.78)",
-    borderColor: "rgba(84, 112, 145, 0.14)",
-  },
-  Input: {
-    color: "#ffffff",
-    colorFocus: "#ffffff",
-    borderHover: "1px solid rgba(65, 110, 205, 0.38)",
-    boxShadowFocus: "0 0 0 2px rgba(53, 109, 255, 0.14)",
-  },
-  Card: {
-    colorEmbedded: "rgba(248, 251, 255, 0.95)",
-    borderColor: "rgba(84, 112, 145, 0.12)",
-  },
-};
+  const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (savedTheme === "dark" || savedTheme === "light") {
+    return savedTheme === "dark";
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+const isDarkTheme = ref(loadInitialTheme());
 
 const currentTheme = computed<GlobalTheme | null>(() =>
   isDarkTheme.value ? darkTheme : null,
@@ -101,6 +38,20 @@ const currentTheme = computed<GlobalTheme | null>(() =>
 const currentThemeOverrides = computed<GlobalThemeOverrides>(() =>
   isDarkTheme.value ? darkThemeOverrides : lightThemeOverrides,
 );
+
+watchEffect(() => {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  document.documentElement.dataset.theme = isDarkTheme.value
+    ? "dark"
+    : "light";
+});
+
+watch(isDarkTheme, (isDark) => {
+  window.localStorage.setItem(THEME_STORAGE_KEY, isDark ? "dark" : "light");
+});
 
 function toggleTheme() {
   isDarkTheme.value = !isDarkTheme.value;
@@ -115,7 +66,12 @@ function toggleTheme() {
     <n-message-provider placement="top" :duration="5000">
       <n-global-style />
 
-      <main :class="['app-shell', { 'app-shell--light': !isDarkTheme }]">
+      <main class="app-shell" :data-theme="isDarkTheme ? 'dark' : 'light'">
+        <div
+          class="window-drag-strip"
+          data-tauri-drag-region
+          aria-hidden="true"
+        />
         <PortKillWorkbench
           :is-dark-theme="isDarkTheme"
           @toggle-theme="toggleTheme"
@@ -126,34 +82,36 @@ function toggleTheme() {
 </template>
 
 <style>
-:root {
-  color-scheme: dark light;
-}
-
 .app-shell {
+  position: relative;
   height: 100vh;
-  padding: 0 14px 14px;
+  padding: 30px 14px 14px;
   overflow: hidden;
-  color: #eaf1fb;
-  background:
-    radial-gradient(circle at top, rgba(61, 100, 214, 0.18), transparent 28%),
-    linear-gradient(180deg, #07111f 0%, #050b14 100%);
+  color: var(--app-text);
+  background: var(--app-bg);
   transition:
     color 0.3s ease,
-    background-color 0.3s ease,
-    background-image 0.3s ease;
+    background-color 0.3s ease;
 }
 
-.app-shell--light {
-  color: #14273d;
-  background:
-    radial-gradient(circle at top, rgba(82, 127, 240, 0.18), transparent 28%),
-    linear-gradient(180deg, #eff5fd 0%, #e4edf8 100%);
+.window-drag-strip {
+  position: absolute;
+  top: 0;
+  right: 8px;
+  left: 76px;
+  z-index: 10;
+  height: 30px;
+  user-select: none;
 }
 
 @media (max-width: 720px) {
   .app-shell {
-    padding: 10px;
+    padding: 30px 10px 10px;
+  }
+
+  .window-drag-strip {
+    right: 6px;
+    left: 76px;
   }
 }
 </style>

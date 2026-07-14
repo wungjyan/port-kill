@@ -1,33 +1,23 @@
 <script setup lang="ts">
+import { ref, watch } from "vue";
+import { NButton, NDropdown, NModal, NPopconfirm } from "naive-ui";
 import {
-  computed,
-  h,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-} from "vue";
-import {
-  NButton,
-  NDataTable,
-  NPopconfirm,
-  NSpace,
-  NTag,
-  type DataTableColumns,
-  type DataTableRowKey,
-  type DataTableSortState,
-} from "naive-ui";
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ChevronRightIcon,
+  ChevronsUpDownIcon,
+  MoreHorizontalIcon,
+} from "@lucide/vue";
 
 import {
   formatAddressSummary,
   formatIpSummary,
   formatStartedAtShort,
   getRowKey,
+  resolveExposure,
   resolvePortTags,
-  tagTypeForTone,
-} from "../portMeta";
-import type { PortProcess, SortKey, SortOrder } from "../types";
+} from "../portMeta.ts";
+import type { PortProcess, SortKey, SortOrder } from "../types.ts";
 import PortDetailPanel from "./PortDetailPanel.vue";
 
 const props = defineProps<{
@@ -37,6 +27,9 @@ const props = defineProps<{
   sortOrder: SortOrder;
   activeKillPids: number[];
   isDarkTheme: boolean;
+  confirmBeforeTerminate: boolean;
+  relatedPortsByPid: Record<number, number[]>;
+  hasActiveQuery: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -44,415 +37,714 @@ const emit = defineEmits<{
   "update:sort": [value: { key: SortKey; order: SortOrder }];
 }>();
 
-const expandedRowKeys = ref<DataTableRowKey[]>([]);
-const tableRootRef = ref<HTMLElement | null>(null);
-const tableMaxHeight = ref(320);
+const expandedRowKeys = ref<string[]>([]);
+const forceTarget = ref<PortProcess | null>(null);
+const forceMenuOptions = [{ label: "强制结束", key: "force" }];
 
-let resizeObserver: ResizeObserver | null = null;
+const defaultOrders: Record<SortKey, SortOrder> = {
+  recent: "descend",
+  port: "ascend",
+  process: "ascend",
+};
 
 watch(
   () => props.items,
   (items) => {
     const validKeys = new Set(items.map((item) => getRowKey(item)));
     expandedRowKeys.value = expandedRowKeys.value.filter((key) =>
-      validKeys.has(String(key)),
+      validKeys.has(key),
     );
   },
   { immediate: true },
 );
 
-function onSorterUpdate(
-  sorter: DataTableSortState | DataTableSortState[] | null,
-) {
-  const sortState = Array.isArray(sorter) ? sorter[0] : sorter;
-  if (!sortState?.columnKey) {
-    emit("update:sort", { key: "recent", order: "descend" });
+function isExpanded(item: PortProcess) {
+  return expandedRowKeys.value.includes(getRowKey(item));
+}
+
+function toggleExpand(item: PortProcess) {
+  const key = getRowKey(item);
+  expandedRowKeys.value = isExpanded(item)
+    ? expandedRowKeys.value.filter((itemKey) => itemKey !== key)
+    : [...expandedRowKeys.value, key];
+}
+
+function updateSort(nextKey: SortKey) {
+  if (props.sortKey !== nextKey) {
+    emit("update:sort", {
+      key: nextKey,
+      order: defaultOrders[nextKey],
+    });
     return;
   }
 
-  const keyMap: Record<string, SortKey> = {
-    port: "port",
-    process: "process",
-    uptime: "recent",
-  };
-
-  const nextKey = keyMap[String(sortState.columnKey)] ?? "recent";
-  const nextOrder = sortState.order === "ascend" ? "ascend" : "descend";
-
-  emit("update:sort", { key: nextKey, order: nextOrder });
-}
-
-function updateTableMaxHeight() {
-  const nextHeight = tableRootRef.value?.clientHeight ?? 0;
-  tableMaxHeight.value = nextHeight > 0 ? nextHeight : 320;
-}
-
-onMounted(async () => {
-  await nextTick();
-  updateTableMaxHeight();
-
-  if (!tableRootRef.value) {
-    return;
-  }
-
-  resizeObserver = new ResizeObserver(() => {
-    updateTableMaxHeight();
+  emit("update:sort", {
+    key: nextKey,
+    order: props.sortOrder === "ascend" ? "descend" : "ascend",
   });
+}
 
-  resizeObserver.observe(tableRootRef.value);
-});
+function sortIconFor(key: SortKey) {
+  if (props.sortKey !== key) {
+    return ChevronsUpDownIcon;
+  }
 
-onBeforeUnmount(() => {
-  resizeObserver?.disconnect();
-  resizeObserver = null;
-});
+  return props.sortOrder === "ascend" ? ArrowUpIcon : ArrowDownIcon;
+}
 
-// Column renderers stay in one computed block so sort indicators and handlers remain aligned.
-const columns = computed<DataTableColumns<PortProcess>>(() => [
-  {
-    type: "expand",
-    width: 52,
-    expandable: () => true,
-    renderExpand: (row) =>
-      h(PortDetailPanel, { item: row, isDarkTheme: props.isDarkTheme }),
-  },
-  {
-    title: "端口",
-    key: "port",
-    width: 90,
-    sorter: true,
-    sortOrder: props.sortKey === "port" ? props.sortOrder : false,
-    render: (row) =>
-      h("div", { class: "port-cell" }, [
-        h("span", { class: "port-value" }, String(row.port)),
-      ]),
-  },
-  {
-    title: "进程",
-    key: "process",
-    width: 220,
-    sorter: true,
-    sortOrder: props.sortKey === "process" ? props.sortOrder : false,
-    render: (row) => {
-      const tags = resolvePortTags(row);
-      const children = [
-        h(
-          "span",
-          { class: "process-name", title: row.command },
-          row.processName,
-        ),
-      ];
+function ariaSort(key: SortKey): "ascending" | "descending" | "none" {
+  if (props.sortKey !== key) {
+    return "none";
+  }
 
-      if (props.currentUser && row.user !== props.currentUser) {
-        children.push(
-          h(
-            NTag,
-            {
-              size: "tiny",
-              bordered: false,
-              type: "warning",
-              class: "process-tag",
-            },
-            { default: () => row.user },
-          ),
-        );
-      }
+  return props.sortOrder === "ascend" ? "ascending" : "descending";
+}
 
-      tags.slice(0, 2).forEach((tag) => {
-        children.push(
-          h(
-            NTag,
-            {
-              size: "tiny",
-              bordered: false,
-              type: tagTypeForTone(tag.tone),
-              class: "process-tag",
-            },
-            { default: () => tag.label },
-          ),
-        );
-      });
+function formatProcessMeta(row: PortProcess) {
+  if (row.cwd) {
+    const normalized = row.cwd.replace(/\\/g, "/");
+    const homeDirectory = props.currentUser
+      ? `/Users/${props.currentUser}`
+      : "";
 
-      return h("div", { class: "process-cell" }, children);
-    },
-  },
-  {
-    title: "PID",
-    key: "pid",
-    width: 100,
-    render: (row) =>
-      h("div", { class: "pid-cell" }, [
-        h("span", { class: "pid-value" }, String(row.pid)),
-      ]),
-  },
-  {
-    title: "地址",
-    key: "address",
-    width: 200,
-    ellipsis: true,
-    render: (row) =>
-      h("div", { class: "address-cell", title: row.hostSummary }, [
-        h("span", { class: "address-value" }, formatAddressSummary(row)),
-        h("span", { class: "address-meta" }, `(${formatIpSummary(row)})`),
-      ]),
-  },
-  {
-    title: "启动时间",
-    key: "uptime",
-    width: 140,
-    sorter: true,
-    sortOrder: props.sortKey === "recent" ? props.sortOrder : false,
-    render: (row) =>
-      h("div", { class: "uptime-wrap" }, [
-        h(
-          "span",
-          {
-            class: "uptime-cell",
-            title: row.startedAt ?? "未知",
-          },
-          formatStartedAtShort(row.startedAt),
-        ),
-      ]),
-  },
-  {
-    title: "操作",
-    key: "actions",
-    width: 140,
-    fixed: "right",
-    render: (row) => {
-      const loading = props.activeKillPids.includes(row.pid);
-      const stopEvent = (event: MouseEvent) => event.stopPropagation();
+    if (homeDirectory && normalized === homeDirectory) {
+      return "~";
+    }
 
-      return h(
-        NSpace,
-        { size: 8, justify: "end", wrapItem: false },
-        {
-          default: () => [
-            h(
-              NPopconfirm,
-              {
-                positiveText: "结束",
-                negativeText: "取消",
-                onPositiveClick: () => emit("kill", row, false),
-              },
-              {
-                trigger: () =>
-                  h(
-                    NButton,
-                    {
-                      size: "small",
-                      secondary: true,
-                      type: "warning",
-                      loading,
-                      disabled: loading,
-                      onClick: stopEvent,
-                    },
-                    { default: () => "结束" },
-                  ),
-                default: () => `确认结束 PID ${row.pid}？`,
-              },
-            ),
-            h(
-              NPopconfirm,
-              {
-                positiveText: "强制结束",
-                negativeText: "取消",
-                onPositiveClick: () => emit("kill", row, true),
-              },
-              {
-                trigger: () =>
-                  h(
-                    NButton,
-                    {
-                      size: "small",
-                      tertiary: true,
-                      type: "error",
-                      loading,
-                      disabled: loading,
-                      onClick: stopEvent,
-                    },
-                    { default: () => "强制" },
-                  ),
-                default: () => `确认强制结束 PID ${row.pid}？`,
-              },
-            ),
-          ],
-        },
-      );
-    },
-  },
-]);
+    if (homeDirectory && normalized.startsWith(`${homeDirectory}/`)) {
+      return `~/${normalized.slice(homeDirectory.length + 1)}`;
+    }
+
+    const parts = normalized.split("/").filter(Boolean);
+    return parts.length > 0 ? `…/${parts.slice(-2).join("/")}` : row.cwd;
+  }
+
+  return row.command;
+}
+
+function canTerminate(item: PortProcess) {
+  return Boolean(props.currentUser) && item.user === props.currentUser;
+}
+
+function relatedPorts(item: PortProcess) {
+  return props.relatedPortsByPid[item.pid] ?? [item.port];
+}
+
+function terminateConfirmation(item: PortProcess) {
+  const ports = relatedPorts(item);
+  if (ports.length === 1) {
+    return `确认结束 PID ${item.pid}？`;
+  }
+
+  return `确认结束 PID ${item.pid}？该进程同时监听端口 ${ports.join("、")}。`;
+}
+
+function openForceConfirm(row: PortProcess) {
+  if (!canTerminate(row)) {
+    return;
+  }
+  forceTarget.value = row;
+}
+
+function confirmForceKill() {
+  if (!forceTarget.value) {
+    return;
+  }
+
+  emit("kill", forceTarget.value, true);
+  forceTarget.value = null;
+}
+
+function requestTerminate(item: PortProcess) {
+  if (!canTerminate(item)) {
+    return;
+  }
+  emit("kill", item, false);
+}
 </script>
 
 <template>
-  <div
-    ref="tableRootRef"
-    :class="['table-root', { 'table-root--light': !isDarkTheme }]"
-  >
-    <n-data-table
-      :columns="columns"
-      :data="items"
-      :bordered="false"
-      :bottom-bordered="false"
-      :single-line="false"
-      :single-column="true"
-      size="small"
-      :max-height="tableMaxHeight"
-      :scroll-x="942"
-      :expanded-row-keys="expandedRowKeys"
-      :row-key="getRowKey"
-      @update:expanded-row-keys="expandedRowKeys = $event"
-      @update:sorter="onSorterUpdate"
-    />
+  <div :class="['table-root', { 'table-root--light': !isDarkTheme }]">
+    <div class="table-scroll">
+      <table class="port-table">
+        <colgroup>
+          <col class="col-expand" />
+          <col class="col-port" />
+          <col class="col-process" />
+          <col class="col-pid" />
+          <col class="col-address" />
+          <col class="col-started" />
+          <col class="col-actions" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th class="col-expand" aria-label="展开详情"></th>
+            <th class="col-port" :aria-sort="ariaSort('port')">
+              <button
+                class="head-button"
+                type="button"
+                aria-label="按端口排序"
+                @click="updateSort('port')"
+              >
+                <span>端口</span>
+                <span
+                  :class="[
+                    'sort-indicator',
+                    { 'sort-indicator--active': sortKey === 'port' },
+                  ]"
+                >
+                  <component
+                    :is="sortIconFor('port')"
+                    :size="12"
+                    aria-hidden="true"
+                  />
+                </span>
+              </button>
+            </th>
+            <th class="col-process" :aria-sort="ariaSort('process')">
+              <button
+                class="head-button"
+                type="button"
+                aria-label="按进程名排序"
+                @click="updateSort('process')"
+              >
+                <span>进程</span>
+                <span
+                  :class="[
+                    'sort-indicator',
+                    { 'sort-indicator--active': sortKey === 'process' },
+                  ]"
+                >
+                  <component
+                    :is="sortIconFor('process')"
+                    :size="12"
+                    aria-hidden="true"
+                  />
+                </span>
+              </button>
+            </th>
+            <th class="col-pid">PID</th>
+            <th class="col-address">地址</th>
+            <th class="col-started" :aria-sort="ariaSort('recent')">
+              <button
+                class="head-button"
+                type="button"
+                aria-label="按启动时间排序"
+                @click="updateSort('recent')"
+              >
+                <span>启动时间</span>
+                <span
+                  :class="[
+                    'sort-indicator',
+                    { 'sort-indicator--active': sortKey === 'recent' },
+                  ]"
+                >
+                  <component
+                    :is="sortIconFor('recent')"
+                    :size="12"
+                    aria-hidden="true"
+                  />
+                </span>
+              </button>
+            </th>
+            <th class="col-actions">操作</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          <template v-if="items.length > 0">
+            <template v-for="item in items" :key="getRowKey(item)">
+              <tr class="data-row">
+                <td class="col-expand">
+                  <button
+                    class="expand-button"
+                    type="button"
+                    :aria-label="isExpanded(item) ? '收起详情' : '展开详情'"
+                    :aria-expanded="isExpanded(item)"
+                    @click="toggleExpand(item)"
+                  >
+                    <ChevronRightIcon :size="14" aria-hidden="true" />
+                  </button>
+                </td>
+                <td class="col-port">
+                  <span class="port-value">{{ item.port }}</span>
+                </td>
+                <td class="col-process">
+                  <div class="process-cell">
+                    <div class="process-line">
+                      <span class="process-name" :title="item.command">
+                        {{ item.processName }}
+                      </span>
+                      <span
+                        v-if="currentUser && item.user !== currentUser"
+                        class="process-tag process-tag--warning"
+                      >
+                        {{ item.user }}
+                      </span>
+                      <span
+                        v-for="tag in resolvePortTags(item).slice(0, 2)"
+                        :key="`${getRowKey(item)}:${tag.label}`"
+                        :class="['process-tag', `process-tag--${tag.tone}`]"
+                      >
+                        {{ tag.label }}
+                      </span>
+                    </div>
+                    <span
+                      class="process-meta"
+                      :title="item.cwd ?? item.command"
+                    >
+                      {{ formatProcessMeta(item) }}
+                    </span>
+                  </div>
+                </td>
+                <td class="col-pid">
+                  <span class="mono-muted">{{ item.pid }}</span>
+                </td>
+                <td class="col-address">
+                  <div class="address-cell" :title="item.hostSummary">
+                    <span class="address-value">{{ formatAddressSummary(item) }}</span>
+                    <span
+                      :class="[
+                        'address-meta',
+                        `address-meta--${resolveExposure(item).tone}`,
+                      ]"
+                    >
+                      {{ formatIpSummary(item) }} · {{ resolveExposure(item).label }}
+                    </span>
+                  </div>
+                </td>
+                <td class="col-started">
+                  <span class="mono-muted" :title="item.startedAt ?? '未知'">
+                    {{ formatStartedAtShort(item.startedAt) }}
+                  </span>
+                </td>
+                <td class="col-actions">
+                  <div class="row-actions">
+                    <n-popconfirm
+                      v-if="confirmBeforeTerminate"
+                      positive-text="结束"
+                      negative-text="取消"
+                      @positive-click="requestTerminate(item)"
+                    >
+                      <template #trigger>
+                        <n-button
+                          size="small"
+                          secondary
+                          type="warning"
+                          class="action-button"
+                          :loading="activeKillPids.includes(item.pid)"
+                          :disabled="
+                            activeKillPids.includes(item.pid) || !canTerminate(item)
+                          "
+                          :title="
+                            canTerminate(item)
+                              ? '向进程发送 TERM 信号'
+                              : `进程属于用户 ${item.user}，当前不可操作`
+                          "
+                          @click.stop
+                        >
+                          结束
+                        </n-button>
+                      </template>
+                      {{ terminateConfirmation(item) }}
+                    </n-popconfirm>
+
+                    <n-button
+                      v-else
+                      size="small"
+                      secondary
+                      type="warning"
+                      class="action-button"
+                      :loading="activeKillPids.includes(item.pid)"
+                      :disabled="
+                        activeKillPids.includes(item.pid) || !canTerminate(item)
+                      "
+                      :title="
+                        canTerminate(item)
+                          ? '向进程发送 TERM 信号'
+                          : `进程属于用户 ${item.user}，当前不可操作`
+                      "
+                      @click.stop="requestTerminate(item)"
+                    >
+                      结束
+                    </n-button>
+
+                    <n-dropdown
+                      :options="forceMenuOptions"
+                      trigger="click"
+                      @select="openForceConfirm(item)"
+                    >
+                      <n-button
+                        size="small"
+                        quaternary
+                        circle
+                        class="more-button"
+                        :aria-label="`打开 PID ${item.pid} 的更多操作`"
+                        :disabled="
+                          activeKillPids.includes(item.pid) || !canTerminate(item)
+                        "
+                        @click.stop
+                      >
+                        <template #icon>
+                          <MoreHorizontalIcon :size="15" aria-hidden="true" />
+                        </template>
+                      </n-button>
+                    </n-dropdown>
+                  </div>
+                </td>
+              </tr>
+
+              <tr v-if="isExpanded(item)" class="detail-row">
+                <td colspan="7">
+                  <PortDetailPanel :item="item" />
+                </td>
+              </tr>
+            </template>
+          </template>
+
+          <tr v-else class="empty-row">
+            <td colspan="7">
+              {{ hasActiveQuery ? "没有匹配到端口监听进程" : "当前没有 TCP 监听端口" }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <n-modal
+      :show="Boolean(forceTarget)"
+      preset="dialog"
+      type="error"
+      title="强制结束进程"
+      positive-text="强制结束"
+      negative-text="取消"
+      @positive-click="confirmForceKill"
+      @negative-click="forceTarget = null"
+      @mask-click="forceTarget = null"
+      @esc="forceTarget = null"
+    >
+      <p class="force-copy">
+        PID {{ forceTarget?.pid }} · {{ forceTarget?.processName }} 将收到 KILL
+        信号。该进程监听的端口
+        {{ forceTarget ? relatedPorts(forceTarget).join("、") : "" }} 都会受到影响。
+      </p>
+    </n-modal>
   </div>
 </template>
 
 <style scoped>
 .table-root {
-  display: flex;
-  flex-direction: column;
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-:deep(.n-data-table) {
-  --n-td-color: transparent;
-  --n-td-color-hover: rgba(30, 53, 83, 0.72);
-  --n-td-color-striped: rgba(16, 30, 46, 0.4);
-  --n-th-color: rgba(9, 21, 36, 0.9);
-  --n-border-color: rgba(80, 107, 136, 0.16);
-  --n-th-text-color: #7d96b5;
-  --n-td-text-color: #e6effb;
-  flex: 1;
+.table-scroll {
+  height: 100%;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: rgba(128, 128, 128, 0.34) transparent;
+  scrollbar-width: thin;
 }
 
-:deep(.n-data-table-th) {
+.table-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.table-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.table-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+  background-color: rgba(128, 128, 128, 0.28);
+}
+
+.table-scroll:hover::-webkit-scrollbar-thumb {
+  background-color: rgba(128, 128, 128, 0.46);
+}
+
+.table-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.port-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: var(--app-text);
+  table-layout: fixed;
+}
+
+.port-table th,
+.port-table td {
+  border-bottom: 1px solid var(--app-border);
+  vertical-align: middle;
+}
+
+.port-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 32px;
+  padding: 0 8px;
+  background: var(--app-panel-subtle);
+  color: var(--app-text-faint);
   font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-weight: 600;
+  text-align: left;
 }
 
-:deep(.n-data-table .n-data-table-td) {
-  padding-top: 6px;
-  padding-bottom: 6px;
+.port-table td {
+  height: 48px;
+  padding: 7px 8px;
+  background: var(--app-panel);
 }
 
-:deep(.n-data-table-wrapper) {
-  min-height: 100%;
+.data-row:hover td {
+  background: var(--app-row-hover);
 }
 
-:deep(.n-data-table .n-data-table-expand .n-data-table-td) {
-  padding-top: 2px;
-  padding-bottom: 8px;
+.head-button {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: inherit;
+  font-weight: inherit;
 }
 
-:deep(.port-cell),
-:deep(.pid-cell),
-:deep(.address-cell) {
+.head-button:hover {
+  color: var(--app-text);
+}
+
+.head-button:focus-visible {
+  border-radius: var(--radius-xs);
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+}
+
+.sort-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  color: var(--app-text-faint);
+}
+
+.head-button:hover .sort-indicator {
+  color: var(--app-text-muted);
+}
+
+.sort-indicator--active {
+  color: var(--app-accent);
+}
+
+.head-button:hover .sort-indicator--active {
+  color: var(--app-accent);
+}
+
+.col-expand {
+  width: 34px;
+  text-align: center;
+}
+
+.col-port {
+  width: 100px;
+}
+
+.col-process {
+  width: 300px;
+}
+
+.col-pid {
+  width: 76px;
+}
+
+.col-address {
+  width: 130px;
+}
+
+.col-started {
+  width: 112px;
+}
+
+.col-actions {
+  width: 100px;
+  text-align: left;
+}
+
+.expand-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--app-text-faint);
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease;
+}
+
+.expand-button:hover {
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+}
+
+.expand-button[aria-expanded="true"] {
+  transform: rotate(90deg);
+}
+
+.port-value {
+  color: var(--app-text);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.process-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.process-line {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.process-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text);
+  text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.process-meta {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.process-tag--service {
+  background: rgba(48, 209, 88, 0.12);
+  color: var(--app-success);
+}
+
+.process-tag--infra,
+.process-tag--warning {
+  background: rgba(255, 159, 10, 0.14);
+  color: var(--app-warning);
+}
+
+.address-cell {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
 
-:deep(.port-cell) {
-  align-content: center;
-  white-space: nowrap;
-}
-
-:deep(.port-value) {
-  color: #f5fbff;
-  font-family: "SF Mono", "JetBrains Mono", "IBM Plex Mono", monospace;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-}
-
-:deep(.address-meta) {
-  color: #6f89a7;
-  font-size: 11px;
-}
-
-:deep(.process-cell) {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
+.address-value {
   overflow: hidden;
-  white-space: nowrap;
-}
-
-:deep(.process-name) {
-  display: block;
-  flex: 1;
-  max-width: 100%;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  color: #edf5ff;
+  color: var(--app-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
   text-overflow: ellipsis;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-:deep(.process-tag) {
-  flex: 0 0 auto;
-  margin-left: 2px;
-}
-
-:deep(.pid-cell) {
   white-space: nowrap;
 }
 
-:deep(.pid-label) {
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-:deep(.pid-value),
-:deep(.address-value),
-:deep(.uptime-cell) {
-  font-family: "SF Mono", "JetBrains Mono", "IBM Plex Mono", monospace;
+.address-meta,
+.mono-muted {
+  color: var(--app-text-muted);
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
-:deep(.address-value) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.address-meta {
+  color: var(--app-text-faint);
+  font-size: 11px;
 }
 
-:deep(.address-cell),
-:deep(.uptime-wrap) {
-  min-width: 0;
-  white-space: nowrap;
+.address-meta--local {
+  color: var(--app-success);
 }
 
-:deep(.uptime-cell) {
-  color: #dce7f8;
+.address-meta--public {
+  color: var(--app-warning);
 }
 
-.table-root--light :deep(.n-data-table) {
-  --n-td-color: transparent;
-  --n-td-color-hover: rgba(225, 235, 246, 0.86);
-  --n-td-color-striped: rgba(241, 246, 252, 0.72);
-  --n-th-color: rgba(244, 248, 253, 0.98);
-  --n-border-color: rgba(92, 118, 149, 0.14);
-  --n-th-text-color: #61778f;
-  --n-td-text-color: #182c43;
+.row-actions {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  justify-content: flex-end;
 }
 
-.table-root--light :deep(.port-value),
-.table-root--light :deep(.process-name) {
-  color: #11263d;
+.action-button {
+  min-width: 42px;
+  border-radius: var(--radius-sm);
 }
 
-.table-root--light :deep(.address-meta) {
-  color: #73879d;
+.more-button {
+  color: var(--app-text-faint);
 }
 
-.table-root--light :deep(.uptime-cell) {
-  color: #2f455d;
+.detail-row td {
+  height: auto;
+  padding: 0;
+  background: var(--app-panel-subtle);
+}
+
+.empty-row td {
+  height: 180px;
+  color: var(--app-text-faint);
+  text-align: center;
+}
+
+.force-copy {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 </style>
