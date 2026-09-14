@@ -90,6 +90,21 @@ fn run_command_with_timeout(
     args: &[&str],
     timeout_secs: u64,
 ) -> Result<String, String> {
+    run_command_with_timeout_allowing_empty_exit(cmd_path, args, timeout_secs, None)
+}
+
+/// `lsof` uses exit code 1 to report that no files matched the query. Treat that
+/// specific empty response as a successful query while preserving real errors.
+fn run_lsof_with_timeout(args: &[&str], timeout_secs: u64) -> Result<String, String> {
+    run_command_with_timeout_allowing_empty_exit("/usr/sbin/lsof", args, timeout_secs, Some(1))
+}
+
+fn run_command_with_timeout_allowing_empty_exit(
+    cmd_path: &str,
+    args: &[&str],
+    timeout_secs: u64,
+    empty_result_exit_code: Option<i32>,
+) -> Result<String, String> {
     let mut child = Command::new(cmd_path)
         .args(args)
         .stdout(Stdio::piped())
@@ -139,7 +154,12 @@ fn run_command_with_timeout(
         .join()
         .map_err(|_| format!("读取 {cmd_path} 的错误输出失败"))??;
 
-    if status.success() {
+    let stdout_is_empty = stdout.iter().all(u8::is_ascii_whitespace);
+    let stderr_is_empty = stderr.iter().all(u8::is_ascii_whitespace);
+    let is_accepted_empty_result =
+        empty_result_exit_code == status.code() && stdout_is_empty && stderr_is_empty;
+
+    if status.success() || is_accepted_empty_result {
         Ok(String::from_utf8_lossy(&stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
@@ -429,8 +449,7 @@ fn list_raw_ports_for_port(port: Option<u16>) -> Result<Vec<RawPortEntry>, Strin
     let tcp_filter = port
         .map(|value| format!("-iTCP:{value}"))
         .unwrap_or_else(|| "-iTCP".to_string());
-    let stdout = run_command_with_timeout(
-        "/usr/sbin/lsof",
+    let stdout = run_lsof_with_timeout(
         &["-nP", &tcp_filter, "-sTCP:LISTEN", "-F", "pcLnPTu"],
         LSOF_TIMEOUT_SECS,
     )?;
@@ -663,11 +682,11 @@ fn load_process_cwds_batch(pids: &[i32]) -> HashMap<i32, String> {
         .map(i32::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let Some(stdout) = run_command_optional(
-        "/usr/sbin/lsof",
+    let Some(stdout) = run_lsof_with_timeout(
         &["-a", "-p", &pid_list, "-d", "cwd", "-Fpn"],
         LSOF_TIMEOUT_SECS,
-    ) else {
+    )
+    .ok() else {
         return HashMap::new();
     };
 
@@ -865,6 +884,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn returns_an_empty_list_for_an_unused_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("allocate an unused port");
+        let port = listener.local_addr().expect("read listener address").port();
+        drop(listener);
+
+        let entries = list_raw_ports_for_port(Some(port))
+            .expect("an unused port should be a successful empty lsof result");
+        assert!(entries.is_empty());
+
+        let rebound = check_port_rebound_blocking(port, i32::MAX, "unused-process")
+            .expect("an unused port should produce a successful rebound check");
+        assert!(!rebound.occupied);
+        assert!(!rebound.rebound);
+    }
 
     #[test]
     fn parses_ipv4_ipv6_and_wildcard_listener_names() {
