@@ -180,6 +180,7 @@ runGit(
   "package.json",
   "src-tauri/tauri.conf.json",
   "src-tauri/Cargo.toml",
+  "src-tauri/Cargo.lock",
 );
 runGit("commit", "-m", `chore(release): prepare ${tag}`);
 runGit("tag", "-a", tag, "-m", `Port Kill ${tag}`);
