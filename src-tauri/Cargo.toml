@@ -3,6 +3,7 @@ name = "port-kill"
 version = "0.1.5"
 description = "A macOS TCP listening port and process manager"
 authors = ["wungjyan"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

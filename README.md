@@ -1,84 +1,136 @@
 # Port Kill
 
-Port Kill 是一款面向开发场景的 macOS 桌面工具，用于扫描本机 TCP 监听端口、定位占用进程，并安全地发送结束或强制结束信号。
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-项目基于 `Tauri 2 + Vue 3 + TypeScript + Vite + Rust` 构建。
+[![Release](https://img.shields.io/github/v/release/wungjyan/port-kill)](https://github.com/wungjyan/port-kill/releases)
+[![License](https://img.shields.io/github/license/wungjyan/port-kill)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)](#platform-support)
 
-## 主要功能
+Port Kill is a native macOS utility for finding processes that occupy TCP listening ports and terminating them with additional identity checks.
 
-- 展示端口、进程名、PID、命令、工作目录、监听地址与启动时间
-- 搜索端口、PID、进程名、命令、工作目录和监听地址
-- 按最近启动时间、端口或进程名排序
-- 标识仅本机、指定地址和所有网卡三类监听范围
-- 提供常见开发端口提示，例如 Vite、Next.js、PostgreSQL、Redis 和 MongoDB
-- 支持普通结束与强制结束，并提示同一进程关联的其他监听端口
-- 操作前复核 PID、端口、用户、进程名和启动时间，降低误杀风险
-- 结束后分阶段检查端口是否被 watcher 或后台服务重新拉起
-- 自动刷新失败时保留上次成功数据；刷新间隔可在设置中调整
-- 跟随系统主题，也可手动切换并持久化偏好
+It is built for local development workflows where a server, watcher, or background service keeps a port busy and a raw `kill` command carries the risk of targeting a stale or unrelated PID.
 
-## 下载与平台支持
+Built with Tauri 2, Vue 3, TypeScript, Vite, and Rust.
 
-发行版可从 [GitHub Releases](https://github.com/wungjyan/port-kill/releases) 下载，提供 Apple Silicon 与 Intel 两种 macOS 架构产物。
+## Why Port Kill?
 
-当前后端固定调用 macOS 的 `/usr/sbin/lsof`、`/bin/ps` 和 `/bin/kill`，因此不支持 Linux 或 Windows。应用只扫描 `TCP LISTEN`，不包含 UDP 或已建立连接。
+Command-line tools such as `lsof`, `ps`, and `kill` are powerful, but resolving a port conflict usually requires combining their output manually. Port Kill presents the relevant process context in one place and revalidates the target immediately before sending a signal.
 
-### 安装包提示“已损坏，无法打开”？
+## Features
 
-当前发行版尚未完成 Apple 公证。从浏览器下载后，macOS 会为应用添加隔离标记；当 Gatekeeper 无法完成来源验证时，可能会显示“已损坏，无法打开”的提示。这类提示反映的是系统的验证状态，不等同于安装包或应用文件实际损坏。
+- Inspect TCP listening ports, process names, PIDs, commands, working directories, listening addresses, and start times.
+- Search by port, PID, process name, command, working directory, or listening address.
+- Sort by most recent start time, port, or process name.
+- Distinguish loopback, specific-address, and all-interface listeners.
+- Recognize common development ports used by tools such as Vite, Next.js, PostgreSQL, Redis, and MongoDB.
+- Send `TERM` for a normal shutdown or `KILL` when a forceful shutdown is explicitly requested.
+- Show other listening ports owned by the same process before termination.
+- Detect when a watcher or service manager reopens a port after the original process exits.
+- Refresh automatically at a configurable interval while preserving the last successful result after a scan failure.
+- Follow the system appearance or use a persistent light/dark preference.
 
-安装时先将 `Port Kill.app` 拖入“应用程序”目录，然后打开“终端”执行：
+## Safety model
+
+Process termination is treated as a destructive operation. Before sending a signal, the Rust backend rescans the selected port and checks the PID, owning user, process name, and start time against the item shown in the interface. This reduces the chance of acting on stale data or a reused PID.
+
+Additional boundaries:
+
+- Only processes owned by the current user can be terminated.
+- Normal termination uses `TERM`; force termination uses the non-catchable `KILL` signal and requires an explicit action.
+- System commands run with timeouts, and timed-out child processes are terminated and reaped.
+- Port and process information is processed locally. Port Kill does not include telemetry or send scan results to a remote service.
+
+These checks reduce risk but cannot eliminate every race condition. Review the process details before terminating it, especially when using force termination.
+
+## Download
+
+Download the latest build from [GitHub Releases](https://github.com/wungjyan/port-kill/releases):
+
+- Apple Silicon Macs: `Port.Kill_<version>_aarch64.dmg`
+- Intel Macs: `Port.Kill_<version>_x64.dmg`
+
+Open the DMG and drag **Port Kill.app** into the Applications folder.
+
+### macOS reports that the app is damaged
+
+Current releases are not yet signed and notarized by Apple. A browser download may therefore receive a quarantine attribute that Gatekeeper cannot verify.
+
+After confirming that the application came from this repository's GitHub Releases page, move it to Applications and run:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Port Kill.app"
+open "/Applications/Port Kill.app"
 ```
 
-如果第一条命令提示权限不足，可改用：
+This removes the quarantine attribute from this application only. Do not run the command on copies obtained from an untrusted source.
+
+## Platform support
+
+Port Kill currently supports **macOS only**. The backend depends on these system commands and paths:
+
+- `/usr/sbin/lsof`
+- `/bin/ps`
+- `/bin/kill`
+
+It scans `TCP LISTEN` sockets only. UDP sockets and established TCP connections are intentionally outside the current scope.
+
+## Development
+
+### Requirements
+
+- macOS
+- Node.js 20 or later
+- pnpm 9 or later
+- Rust stable
+- Xcode Command Line Tools
+
+### Run locally
 
 ```bash
-sudo xattr -dr com.apple.quarantine "/Applications/Port Kill.app"
-```
-
-该操作会移除 macOS 为下载项添加的隔离标记。出于安全考虑，请仅对从本项目 GitHub Releases 获取的安装包执行。
-
-## 安全边界
-
-- 只允许结束当前用户所属的进程，系统进程和其他用户进程不可操作。
-- 进程列表可能在刷新间隔内发生变化；后端会在发送信号前重新验证目标身份。
-- 普通结束发送 `TERM`，允许进程清理资源；强制结束发送不可拦截的 `KILL`，应谨慎使用。
-- 系统命令均带超时控制，超时后会主动终止并回收子进程。
-
-## 本地开发
-
-环境要求：macOS、Node.js 20、pnpm 9、Rust stable，以及 Xcode Command Line Tools。
-
-```bash
-# 安装依赖
 pnpm install
-
-# 启动桌面开发模式
 pnpm tauri dev
+```
 
-# 前端类型检查与生产构建
+Use `pnpm dev` to work on the interface in a browser. Tauri backend commands are unavailable in browser-only mode.
+
+### Validate changes
+
+```bash
 pnpm build
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+```
 
-# 构建当前 Mac 架构的安装包
+### Build the desktop application
+
+```bash
 pnpm tauri build
 ```
 
-仅调试前端界面时，可运行 `pnpm dev`；浏览器环境无法调用 Tauri 后端命令。
-
-## 项目结构
+## Project structure
 
 ```text
-src/                         Vue 前端
-src/components/              端口列表、工具栏与详情组件
-src-tauri/src/lib.rs         端口扫描、进程校验与结束逻辑
-src-tauri/tauri.conf.json    窗口、安全策略与打包配置
-docs/frontend-api.md         前后端数据接口说明
-.github/workflows/release.yml 双架构 macOS 发布工作流
+src/                          Vue frontend
+src/components/               Port list, toolbar, and process details
+src-tauri/src/lib.rs          Port scanning, identity checks, and termination
+src-tauri/tauri.conf.json     Desktop window, security, and bundle settings
+docs/frontend-api.md          Frontend/backend data contract
+docs/releasing.md             Maintainer release checklist
+.github/workflows/release.yml Dual-architecture macOS release workflow
 ```
 
-## 发布
+## Releases
 
-推送 `v*` 标签后，GitHub Actions 会校验标签与项目版本是否一致，并分别构建 Apple Silicon 和 Intel 发行产物。完整步骤见 [发布清单](./docs/releasing.md)，版本变化见 [CHANGELOG](./CHANGELOG.md)。
+Pushing a `v*` tag starts the GitHub Actions release workflow. It validates that the tag matches the versions in the JavaScript, Tauri, and Rust manifests, then builds release artifacts for Apple Silicon and Intel Macs.
+
+See the [release checklist](./docs/releasing.md) and [changelog](./CHANGELOG.md) for details.
+
+## Contributing
+
+Bug reports and focused pull requests are welcome. For a substantial behavior change or new platform proposal, open an issue first so the scope and safety implications can be discussed.
+
+Changes to the termination flow should preserve target revalidation, current-user restrictions, command timeouts, and clear user-facing errors.
+
+## License
+
+Port Kill is available under the [MIT License](./LICENSE).
