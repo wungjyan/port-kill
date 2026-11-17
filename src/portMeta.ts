@@ -1,5 +1,4 @@
-import { defaultPortHints, loadPortHints } from "./portHints";
-import type { PortProcess, PortTag, PortTagTone } from "./types";
+import type { PortProcess } from "./types";
 
 const monthMap: Record<string, string> = {
   Jan: "01",
@@ -15,30 +14,6 @@ const monthMap: Record<string, string> = {
   Nov: "11",
   Dec: "12",
 };
-
-const toneMap: Record<PortTagTone, "info" | "success" | "warning"> = {
-  framework: "info",
-  service: "success",
-  infra: "warning",
-};
-
-const portHints = typeof window === "undefined" ? defaultPortHints : loadPortHints();
-
-export function resolvePortTags(item: PortProcess): PortTag[] {
-  const matched = portHints.find((hint) => hint.port === item.port);
-  if (!matched) {
-    return [];
-  }
-
-  return matched.labels.map((label) => ({
-    label,
-    tone: matched.tone ?? "service",
-  }));
-}
-
-export function tagTypeForTone(tone: PortTagTone): "info" | "success" | "warning" {
-  return toneMap[tone];
-}
 
 export function formatStartedAtShort(value: string | null): string {
   if (!value) {
@@ -71,14 +46,6 @@ export function formatAddressSummary(item: PortProcess): string {
   }
 
   return item.hosts.join(" / ");
-}
-
-export function formatIpSummary(item: PortProcess): string {
-  if (item.ipVersions.length > 1) {
-    return "IPv4 + IPv6";
-  }
-
-  return item.ipVersions[0] ?? "TCP";
 }
 
 export function resolveExposure(item: PortProcess): {

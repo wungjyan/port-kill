@@ -22,7 +22,7 @@ Command-line tools such as `lsof`, `ps`, and `kill` are powerful, but resolving 
 - Search by port, PID, process name, command, working directory, or listening address.
 - Sort by most recent start time, port, or process name.
 - Distinguish loopback, specific-address, and all-interface listeners.
-- Recognize common development ports used by tools such as Vite, Next.js, PostgreSQL, Redis, and MongoDB.
+- Attribute ports published by Docker to their container, while keeping the real forwarding process visible.
 - Send `TERM` for a normal shutdown or `KILL` when a forceful shutdown is explicitly requested.
 - Show other listening ports owned by the same process before termination.
 - Detect when a watcher or service manager reopens a port after the original process exits.
@@ -31,11 +31,13 @@ Command-line tools such as `lsof`, `ps`, and `kill` are powerful, but resolving 
 
 ## Safety model
 
-Process termination is treated as a destructive operation. Before sending a signal, the Rust backend rescans the selected port and checks the PID, owning user, process name, and start time against the item shown in the interface. This reduces the chance of acting on stale data or a reused PID.
+Process termination is treated as a destructive operation. Before sending a signal, the Rust backend rescans the selected port and checks the PID, owning user, process name, and start time against the item shown in the interface. Start time is mandatory: if it is missing or cannot be read again, the operation is refused rather than skipping the PID-reuse check. This reduces the chance of acting on stale data or a reused PID.
 
 Additional boundaries:
 
 - Only processes owned by the current user can be terminated.
+- Port Kill refuses to terminate itself, its own ancestor chain, and system PID 1.
+- Docker forwarding processes are never terminated by Port Kill; stop the corresponding container in Docker Desktop instead.
 - Normal termination uses `TERM`; force termination uses the non-catchable `KILL` signal and requires an explicit action.
 - System commands run with timeouts, and timed-out child processes are terminated and reaped.
 - Port and process information is processed locally. Port Kill does not include telemetry or send scan results to a remote service.

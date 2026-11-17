@@ -22,7 +22,7 @@
 
 ## 1. `list_ports`
 
-扫描当前 macOS 上所有 `TCP LISTEN` 端口，聚合端口、进程、监听地址、命令行、工作目录、启动时间等信息。
+扫描当前 macOS 上所有 `TCP LISTEN` 端口，聚合端口、进程、监听地址、命令行、工作目录、启动时间与 Docker 容器归因等信息。Docker 探测是增强项，CLI 或守护进程不可用时不会阻止普通端口列表返回。
 
 ### 调用
 
@@ -43,6 +43,7 @@ const response = await invoke<PortListResponse>("list_ports");
 export type PortListResponse = {
   currentUser: string;
   items: PortProcess[];
+  dockerAvailable: boolean;
 };
 ```
 
@@ -52,10 +53,19 @@ export type PortListResponse = {
 | --- | --- | --- |
 | `currentUser` | `string` | 当前登录用户，来自环境变量 `USER`，失败时为 `"unknown"` |
 | `items` | `PortProcess[]` | 端口进程列表 |
+| `dockerAvailable` | `boolean` | `docker ps` 是否成功执行；无法区分“Docker 未运行”和“没有匹配容器”时由该字段说明 |
 
 ### `PortProcess`
 
 ```ts
+export type PortContainer = {
+  name: string;
+  image: string;
+  project: string;
+  service: string;
+  containerPort: number | null;
+};
+
 export type PortProcess = {
   pid: number;
   processName: string;
@@ -70,6 +80,8 @@ export type PortProcess = {
   cwd: string | null;
   startedAt: string | null;
   startedAtTs: number | null;
+  container: PortContainer | null;
+  dockerProxy: boolean;
 };
 ```
 
@@ -88,6 +100,10 @@ export type PortProcess = {
 | `cwd` | `string \| null` | 进程工作目录；权限不足或读取失败时为 `null` | 区分多个开发项目的关键字段，可显示路径尾部 |
 | `startedAt` | `string \| null` | 进程启动时间，来自 `ps lstart`，例如 `Thu May 21 14:10:00 2026` | 可格式化后展示 |
 | `startedAtTs` | `number \| null` | 后端生成的可排序时间数值，格式类似 `YYYYMMDDHHMMSS` | UI 排序推荐使用 |
+| `container` | `PortContainer \| null` | Docker 发布端口时对应的容器；无法归因时为 `null` | 行内显示容器标记，详情展示镜像与 compose 信息 |
+| `dockerProxy` | `boolean` | 该行是否为 Docker 端口转发进程 | 为 `true` 时禁止结束，点击操作应解释原因 |
+
+`container` 只替换端口归因信息，不会替换真实 `processName`。表格必须保留 `com.docker.backend` 等实际持有端口的进程名，避免掩盖信号真正会到达的目标。
 
 ### 后端排序规则
 
@@ -158,7 +174,7 @@ type KillProcessArgs = {
 | `pid` | `number` | 是 | 要结束的进程 PID，必须大于 0 |
 | `force` | `boolean` | 否 | `false` 或省略时发送 `TERM`；`true` 时发送 `KILL` |
 | `expectedPort` | `number` | 是 | 列表中该进程监听的端口，用于操作前复核 |
-| `expectedStartedAtTs` | `number \| null` | 是 | 列表中的启动时间标识，用于识别 PID 复用 |
+| `expectedStartedAtTs` | `number \| null` | 是 | 列表中的启动时间标识，用于识别 PID 复用；传 `null` 会被拒绝 |
 | `expectedProcessName` | `string` | 是 | 列表中的进程名，用于身份复核 |
 | `expectedUser` | `string` | 是 | 列表中的进程所属用户；当前只允许操作当前用户进程 |
 
@@ -182,7 +198,11 @@ export type KillResult = {
 
 ### 行为说明
 
-后端会重新扫描目标端口，复核 PID、进程名、所属用户和启动时间，再用 `kill -0 <pid>` 检查进程是否存在，然后执行：
+后端会拒绝结束 Port Kill 自身、它所在的祖先进程链以及 PID 1，然后重新扫描目标端口，复核 PID、进程名、所属用户和启动时间，再用 `kill -0 <pid>` 检查进程是否存在，最后执行：
+
+启动时间必须同时存在于列表记录和操作前的实时读取结果中。任一方向缺失都会拒绝操作，不会跳过 PID 复用检查。`ps` 子进程固定使用 `LC_ALL=C` 与 `LANG=C`，避免中文等语言环境导致启动时间无法解析。
+
+Docker 端口会再次探测。若目标端口属于 Docker 发布映射，或目标进程名匹配 Docker 转发进程，后端会拒绝结束并要求到 Docker Desktop 停止对应容器；该拒绝不依赖前端按钮禁用。
 
 | `force` | 系统命令 | 含义 |
 | --- | --- | --- |
@@ -198,8 +218,14 @@ export type KillResult = {
 | 错误文本 | 触发条件 | UI 建议 |
 | --- | --- | --- |
 | `无效的 PID` | `pid <= 0` | 不应出现，可视为开发错误 |
+| `不能结束系统进程` | 目标 PID 为 1 | 不应出现在正常列表中 |
+| `不能结束 Port Kill 自身...` | 目标为当前应用进程 | UI 应提前禁用或提示 |
+| `不能结束 Port Kill 所在的进程链...` | 目标为当前应用祖先进程 | UI 应提前禁用或提示 |
 | `进程 {pid} 不存在` | kill 前进程已不存在 | 提示进程已退出，并刷新列表 |
 | `进程身份已变化...` | 列表数据过期、目标端口或 PID 已变化 | 阻止操作并提示刷新列表 |
+| `列表中的进程 {pid} 缺少启动时间...` | 列表记录的启动时间为空 | 阻止操作并刷新列表 |
+| `无法确认进程 {pid} 的启动时间...` | 操作前无法读取或解析启动时间 | 阻止操作并刷新列表 |
+| `端口 {port} 由 Docker 端口转发进程持有...` | 目标为 Docker 发布端口或转发进程 | 展示容器信息并引导到 Docker Desktop |
 | `没有权限结束进程 {pid}...` | 系统返回 `Operation not permitted` | 提示权限不足 |
 | `进程 {pid} 已退出` | 系统返回 `No such process` | 提示已退出，并刷新列表 |
 | `进程 {pid} 未响应结束信号，请尝试强制结束` | `TERM` 后轮询仍存在 | 提示可尝试强制结束 |

@@ -15,6 +15,25 @@ const fullAddress = computed(() => {
 
   return props.item.hosts.join(" / ");
 });
+
+const containerSummary = computed(() => {
+  const container = props.item.container;
+  if (!container) {
+    return "";
+  }
+
+  return [
+    container.name,
+    container.image,
+    container.project ? `compose: ${container.project}` : "",
+    container.service ? `service: ${container.service}` : "",
+    container.containerPort === null
+      ? ""
+      : `容器端口 ${container.containerPort}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+});
 </script>
 
 <template>
@@ -48,6 +67,11 @@ const fullAddress = computed(() => {
       <span class="detail-label">启动时间</span>
       <span class="detail-value">{{ formatStartedAtFull(item.startedAt) }}</span>
     </div>
+
+    <div v-if="item.container" class="detail-section detail-section--wide">
+      <span class="detail-label">Docker 容器</span>
+      <span class="detail-value">{{ containerSummary }}</span>
+    </div>
   </div>
 </template>
 
@@ -68,6 +92,10 @@ const fullAddress = computed(() => {
 }
 
 .detail-section--command {
+  grid-column: 1 / -1;
+}
+
+.detail-section--wide {
   grid-column: 1 / -1;
 }
 

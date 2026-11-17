@@ -11,11 +11,9 @@ import {
 
 import {
   formatAddressSummary,
-  formatIpSummary,
   formatStartedAtShort,
   getRowKey,
   resolveExposure,
-  resolvePortTags,
 } from "../portMeta.ts";
 import type { PortProcess, SortKey, SortOrder } from "../types.ts";
 import PortDetailPanel from "./PortDetailPanel.vue";
@@ -23,6 +21,7 @@ import PortDetailPanel from "./PortDetailPanel.vue";
 const props = defineProps<{
   items: PortProcess[];
   currentUser: string;
+  dockerAvailable: boolean;
   sortKey: SortKey;
   sortOrder: SortOrder;
   activeKillPids: number[];
@@ -39,6 +38,7 @@ const emit = defineEmits<{
 
 const expandedRowKeys = ref<string[]>([]);
 const forceTarget = ref<PortProcess | null>(null);
+const dockerExplanationTarget = ref<PortProcess | null>(null);
 const forceMenuOptions = [{ label: "强制结束", key: "force" }];
 
 const defaultOrders: Record<SortKey, SortOrder> = {
@@ -100,30 +100,78 @@ function ariaSort(key: SortKey): "ascending" | "descending" | "none" {
   return props.sortOrder === "ascend" ? "ascending" : "descending";
 }
 
-function formatProcessMeta(row: PortProcess) {
-  if (row.cwd) {
-    const normalized = row.cwd.replace(/\\/g, "/");
-    const homeDirectory = props.currentUser
-      ? `/Users/${props.currentUser}`
-      : "";
+function formatPath(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  const homeDirectory = props.currentUser
+    ? `/Users/${props.currentUser}`
+    : "";
 
-    if (homeDirectory && normalized === homeDirectory) {
-      return "~";
-    }
-
-    if (homeDirectory && normalized.startsWith(`${homeDirectory}/`)) {
-      return `~/${normalized.slice(homeDirectory.length + 1)}`;
-    }
-
-    const parts = normalized.split("/").filter(Boolean);
-    return parts.length > 0 ? `…/${parts.slice(-2).join("/")}` : row.cwd;
+  if (homeDirectory && normalized === homeDirectory) {
+    return "~";
   }
 
-  return row.command;
+  if (homeDirectory && normalized.startsWith(`${homeDirectory}/`)) {
+    return `~/${normalized.slice(homeDirectory.length + 1)}`;
+  }
+
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.length > 0 ? `…/${parts.slice(-2).join("/")}` : path;
+}
+
+function executableFromCommand(command: string) {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const quote = trimmed[0];
+  let executable = "";
+  if (quote === '"' || quote === "'") {
+    const closeIndex = trimmed.indexOf(quote, 1);
+    executable =
+      closeIndex === -1
+        ? trimmed.slice(1)
+        : trimmed.slice(1, closeIndex);
+  } else {
+    executable = trimmed.split(/\s+/)[0] ?? "";
+  }
+
+  return executable.trim().startsWith("-") ? "" : executable.trim();
+}
+
+function formatProcessMeta(row: PortProcess) {
+  if (row.cwd && row.cwd !== "/") {
+    return formatPath(row.cwd);
+  }
+
+  const executable = executableFromCommand(row.command);
+  if (executable) {
+    return executable.includes("/") || executable.includes("\\")
+      ? formatPath(executable)
+      : executable;
+  }
+
+  return row.command.trim() || "未知进程";
 }
 
 function canTerminate(item: PortProcess) {
-  return Boolean(props.currentUser) && item.user === props.currentUser;
+  return terminateDisabledReason(item) === "";
+}
+
+function terminateDisabledReason(item: PortProcess) {
+  if (!props.currentUser) {
+    return "当前用户信息不可用，暂不能结束进程";
+  }
+
+  if (item.user !== props.currentUser) {
+    return `进程属于用户 ${item.user}，当前不可操作`;
+  }
+
+  if (item.startedAtTs === null) {
+    return "缺少启动时间，无法安全复核进程身份";
+  }
+
+  return "";
 }
 
 function relatedPorts(item: PortProcess) {
@@ -139,7 +187,41 @@ function terminateConfirmation(item: PortProcess) {
   return `确认结束 PID ${item.pid}？该进程同时监听端口 ${ports.join("、")}。`;
 }
 
+function isDockerBlocked(item: PortProcess) {
+  return item.dockerProxy || item.container !== null;
+}
+
+function openDockerExplanation(item: PortProcess) {
+  dockerExplanationTarget.value = item;
+}
+
+function dockerExplanation(item: PortProcess) {
+  const container = item.container;
+  if (container) {
+    return `端口 ${item.port} 由 Docker 端口转发进程“${item.processName}”（PID ${item.pid}）持有，不能在这里结束。请停止容器“${container.name}”。结束转发进程不会停止容器，还会影响该容器发布的其它端口。`;
+  }
+
+  if (!props.dockerAvailable) {
+    return `端口 ${item.port} 由 Docker 端口转发进程“${item.processName}”（PID ${item.pid}）持有，但 Docker 当前不可用，无法确认背后的容器。为避免中断端口转发，已阻止结束操作。`;
+  }
+
+  return `端口 ${item.port} 由 Docker 端口转发进程“${item.processName}”（PID ${item.pid}）持有，但没有找到对应容器。为避免中断端口转发，已阻止结束操作。`;
+}
+
+function dockerPortMapping(item: PortProcess) {
+  if (!item.container || item.container.containerPort === null) {
+    return "";
+  }
+
+  return `宿主机 ${item.port} → 容器 ${item.container.containerPort}`;
+}
+
 function openForceConfirm(row: PortProcess) {
+  if (isDockerBlocked(row)) {
+    openDockerExplanation(row);
+    return;
+  }
+
   if (!canTerminate(row)) {
     return;
   }
@@ -282,11 +364,17 @@ function requestTerminate(item: PortProcess) {
                         {{ item.user }}
                       </span>
                       <span
-                        v-for="tag in resolvePortTags(item).slice(0, 2)"
-                        :key="`${getRowKey(item)}:${tag.label}`"
-                        :class="['process-tag', `process-tag--${tag.tone}`]"
+                        v-if="item.container"
+                        class="process-tag process-tag--docker"
+                        :title="`${item.container.name} · ${item.container.image || '镜像未知'}`"
                       >
-                        {{ tag.label }}
+                        Docker · {{ item.container.name }}
+                      </span>
+                      <span
+                        v-else-if="item.dockerProxy"
+                        class="process-tag process-tag--docker"
+                      >
+                        Docker
                       </span>
                     </div>
                     <span
@@ -304,12 +392,11 @@ function requestTerminate(item: PortProcess) {
                   <div class="address-cell" :title="item.hostSummary">
                     <span class="address-value">{{ formatAddressSummary(item) }}</span>
                     <span
-                      :class="[
-                        'address-meta',
-                        `address-meta--${resolveExposure(item).tone}`,
-                      ]"
+                      v-if="resolveExposure(item).tone === 'public'"
+                      class="address-warning"
+                      title="服务监听在所有网卡；如需仅本机访问，请将服务绑定到 127.0.0.1 或 ::1。"
                     >
-                      {{ formatIpSummary(item) }} · {{ resolveExposure(item).label }}
+                      局域网可访问
                     </span>
                   </div>
                 </td>
@@ -320,8 +407,20 @@ function requestTerminate(item: PortProcess) {
                 </td>
                 <td class="col-actions">
                   <div class="row-actions">
+                    <n-button
+                      v-if="isDockerBlocked(item)"
+                      size="small"
+                      secondary
+                      type="error"
+                      class="action-button"
+                      title="查看 Docker 端口转发说明"
+                      @click.stop="openDockerExplanation(item)"
+                    >
+                      结束
+                    </n-button>
+
                     <n-popconfirm
-                      v-if="confirmBeforeTerminate"
+                      v-else-if="confirmBeforeTerminate"
                       positive-text="结束"
                       negative-text="取消"
                       @positive-click="requestTerminate(item)"
@@ -336,17 +435,18 @@ function requestTerminate(item: PortProcess) {
                           :disabled="
                             activeKillPids.includes(item.pid) || !canTerminate(item)
                           "
-                          :title="
-                            canTerminate(item)
-                              ? '向进程发送 TERM 信号'
-                              : `进程属于用户 ${item.user}，当前不可操作`
-                          "
+                          :title="canTerminate(item) ? '向进程发送 TERM 信号' : terminateDisabledReason(item)"
                           @click.stop
                         >
                           结束
                         </n-button>
                       </template>
-                      {{ terminateConfirmation(item) }}
+                      <div class="confirm-copy">
+                        <p>{{ terminateConfirmation(item) }}</p>
+                        <code class="command-block">{{
+                          item.command || item.processName
+                        }}</code>
+                      </div>
                     </n-popconfirm>
 
                     <n-button
@@ -359,17 +459,14 @@ function requestTerminate(item: PortProcess) {
                       :disabled="
                         activeKillPids.includes(item.pid) || !canTerminate(item)
                       "
-                      :title="
-                        canTerminate(item)
-                          ? '向进程发送 TERM 信号'
-                          : `进程属于用户 ${item.user}，当前不可操作`
-                      "
+                      :title="canTerminate(item) ? '向进程发送 TERM 信号' : terminateDisabledReason(item)"
                       @click.stop="requestTerminate(item)"
                     >
                       结束
                     </n-button>
 
                     <n-dropdown
+                      v-if="!isDockerBlocked(item)"
                       :options="forceMenuOptions"
                       trigger="click"
                       @select="openForceConfirm(item)"
@@ -428,6 +525,45 @@ function requestTerminate(item: PortProcess) {
         信号。该进程监听的端口
         {{ forceTarget ? relatedPorts(forceTarget).join("、") : "" }} 都会受到影响。
       </p>
+      <code class="command-block force-command">{{
+        forceTarget?.command || forceTarget?.processName || ""
+      }}</code>
+    </n-modal>
+
+    <n-modal
+      :show="Boolean(dockerExplanationTarget)"
+      preset="dialog"
+      type="error"
+      title="Docker 端口不能在这里结束"
+      positive-text="知道了"
+      @positive-click="dockerExplanationTarget = null"
+      @mask-click="dockerExplanationTarget = null"
+      @esc="dockerExplanationTarget = null"
+    >
+      <div class="docker-explanation">
+        <p>{{ dockerExplanationTarget ? dockerExplanation(dockerExplanationTarget) : "" }}</p>
+        <div
+          v-if="dockerExplanationTarget?.container"
+          class="docker-facts"
+        >
+          <span>
+            <strong>容器</strong>
+            {{ dockerExplanationTarget.container.name }}
+          </span>
+          <span v-if="dockerExplanationTarget.container.image">
+            <strong>镜像</strong>
+            {{ dockerExplanationTarget.container.image }}
+          </span>
+          <span v-if="dockerExplanationTarget.container.project">
+            <strong>Compose</strong>
+            {{ dockerExplanationTarget.container.project }}
+          </span>
+          <span v-if="dockerPortMapping(dockerExplanationTarget)">
+            <strong>映射</strong>
+            {{ dockerPortMapping(dockerExplanationTarget) }}
+          </span>
+        </div>
+      </div>
     </n-modal>
   </div>
 </template>
@@ -667,15 +803,17 @@ function requestTerminate(item: PortProcess) {
   font-weight: 650;
 }
 
-.process-tag--service {
-  background: rgba(48, 209, 88, 0.12);
-  color: var(--app-success);
-}
-
-.process-tag--infra,
 .process-tag--warning {
   background: rgba(255, 159, 10, 0.14);
   color: var(--app-warning);
+}
+
+.process-tag--docker {
+  max-width: 160px;
+  overflow: hidden;
+  background: rgba(255, 159, 10, 0.14);
+  color: var(--app-warning);
+  text-overflow: ellipsis;
 }
 
 .address-cell {
@@ -693,24 +831,16 @@ function requestTerminate(item: PortProcess) {
   white-space: nowrap;
 }
 
-.address-meta,
 .mono-muted {
   color: var(--app-text-muted);
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
-.address-meta {
-  color: var(--app-text-faint);
-  font-size: 11px;
-}
-
-.address-meta--local {
-  color: var(--app-success);
-}
-
-.address-meta--public {
+.address-warning {
   color: var(--app-warning);
+  font-size: 11px;
+  line-height: 1.2;
 }
 
 .row-actions {
@@ -746,5 +876,58 @@ function requestTerminate(item: PortProcess) {
   color: var(--app-text-muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.confirm-copy p,
+.docker-explanation p {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.command-block {
+  display: block;
+  max-height: 96px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-sm);
+  background: var(--app-panel-subtle);
+  color: var(--app-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.force-command {
+  margin-top: 12px;
+}
+
+.docker-facts {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--app-border);
+  color: var(--app-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.docker-facts span {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.docker-facts strong {
+  color: var(--app-text-faint);
+  font-family: var(--font-sans);
+  font-weight: 600;
 }
 </style>

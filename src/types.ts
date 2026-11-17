@@ -1,3 +1,11 @@
+export type PortContainer = {
+  name: string;
+  image: string;
+  project: string;
+  service: string;
+  containerPort: number | null;
+};
+
 export type PortProcess = {
   pid: number;
   processName: string;
@@ -12,11 +20,14 @@ export type PortProcess = {
   cwd: string | null;
   startedAt: string | null;
   startedAtTs: number | null;
+  container: PortContainer | null;
+  dockerProxy: boolean;
 };
 
 export type PortListResponse = {
   currentUser: string;
   items: PortProcess[];
+  dockerAvailable: boolean;
 };
 
 export type KillResult = {
@@ -40,10 +51,3 @@ export type ReboundCheckResult = {
 export type SortKey = "recent" | "port" | "process";
 
 export type SortOrder = "ascend" | "descend";
-
-export type PortTagTone = "framework" | "service" | "infra";
-
-export type PortTag = {
-  label: string;
-  tone: PortTagTone;
-};

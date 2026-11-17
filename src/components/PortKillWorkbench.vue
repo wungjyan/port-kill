@@ -35,6 +35,10 @@ type WorkbenchSettings = {
   confirmBeforeTerminate: boolean;
 };
 
+type LoadOptions = {
+  silent?: boolean;
+};
+
 defineEmits<{
   toggleTheme: [];
 }>();
@@ -71,6 +75,7 @@ const settingsOpen = ref(false);
 const settings = ref<WorkbenchSettings>(loadSettings());
 const query = ref("");
 const currentUser = ref("");
+const dockerAvailable = ref(false);
 const items = ref<PortProcess[]>([]);
 const sortKey = ref<SortKey>("recent");
 const sortOrder = ref<SortOrder>("descend");
@@ -81,6 +86,8 @@ const lastLoadTime = ref<number>(0);
 const lastUpdatedAt = ref<Date | null>(null);
 let refreshTimer: number | null = null;
 let currentLoadPromise: Promise<boolean> | null = null;
+let queuedLoadOptions: LoadOptions | null = null;
+let queuedLoadPromise: Promise<boolean> | null = null;
 const reboundCheckTimers = new Set<number>();
 
 const filteredItems = computed(() => {
@@ -98,6 +105,10 @@ const filteredItems = computed(() => {
       item.command,
       item.cwd ?? "",
       item.hostSummary,
+      item.container?.name ?? "",
+      item.container?.image ?? "",
+      item.container?.project ?? "",
+      item.container?.service ?? "",
     ]
       .join("\n")
       .toLowerCase();
@@ -261,9 +272,36 @@ function scheduleAutoRefresh() {
   }, settings.value.refreshIntervalMs);
 }
 
-async function loadPorts(options: { silent?: boolean } = {}) {
+function queueLoadAfterCurrent(
+  options: LoadOptions,
+  activeLoad: Promise<boolean>,
+): Promise<boolean> {
+  const silent = options.silent ?? false;
+  queuedLoadOptions = {
+    silent:
+      queuedLoadOptions === null
+        ? silent
+        : Boolean(queuedLoadOptions.silent) && silent,
+  };
+
+  if (queuedLoadPromise === null) {
+    // Reusing the active scan can return data captured before a kill completed.
+    // Queue one follow-up scan so callers always observe the state after their
+    // action, while concurrent requests still collapse into that single scan.
+    queuedLoadPromise = activeLoad.then(() => {
+      const nextOptions = queuedLoadOptions ?? {};
+      queuedLoadOptions = null;
+      queuedLoadPromise = null;
+      return loadPorts(nextOptions);
+    });
+  }
+
+  return queuedLoadPromise;
+}
+
+async function loadPorts(options: LoadOptions = {}): Promise<boolean> {
   if (currentLoadPromise) {
-    return currentLoadPromise;
+    return queueLoadAfterCurrent(options, currentLoadPromise);
   }
 
   const silent = options.silent ?? false;
@@ -291,6 +329,7 @@ async function loadPorts(options: { silent?: boolean } = {}) {
     try {
       const response = await invoke<PortListResponse>("list_ports");
       currentUser.value = response.currentUser;
+      dockerAvailable.value = response.dockerAvailable;
       items.value = response.items;
       clearTimeout(slowNoticeId);
       loadError.value = "";
@@ -534,6 +573,7 @@ onBeforeUnmount(() => {
           v-show="!initialLoading && !loadError"
           :items="sortedItems"
           :current-user="currentUser"
+          :docker-available="dockerAvailable"
           :sort-key="sortKey"
           :sort-order="sortOrder"
           :active-kill-pids="activeKillPids"
