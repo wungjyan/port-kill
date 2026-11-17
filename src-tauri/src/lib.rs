@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,6 +15,15 @@ const KILL_POLL_INTERVALS_MS: [u64; 10] = [50, 50, 50, 100, 100, 100, 200, 200, 
 const LSOF_TIMEOUT_SECS: u64 = 5;
 const PS_TIMEOUT_SECS: u64 = 3;
 const KILL_TIMEOUT_SECS: u64 = 2;
+const DOCKER_TIMEOUT_SECS: u64 = 3;
+const SELF_CHAIN_DEPTH: usize = 8;
+const DOCKER_FORMAT: &str = "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}";
+const DOCKER_PROXY_NAMES: [&str; 4] = [
+    "com.docker.backend",
+    "docker-proxy",
+    "vpnkit",
+    "com.docker.vpnkit",
+];
 
 #[derive(Debug, Clone)]
 struct RawPortEntry {
@@ -25,6 +35,16 @@ struct RawPortEntry {
     port: u16,
     state: String,
     ip_version: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PortContainer {
+    name: String,
+    image: String,
+    project: String,
+    service: String,
+    container_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -43,6 +63,8 @@ struct PortProcess {
     cwd: Option<String>,
     started_at: Option<String>,
     started_at_ts: Option<i64>,
+    container: Option<PortContainer>,
+    docker_proxy: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +72,7 @@ struct PortProcess {
 struct PortListResponse {
     current_user: String,
     items: Vec<PortProcess>,
+    docker_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,6 +106,12 @@ struct ProcessContext {
     started_at_ts: Option<i64>,
 }
 
+#[derive(Debug, Default)]
+struct DockerProbe {
+    available: bool,
+    ports: HashMap<u16, PortContainer>,
+}
+
 /// Execute a command with timeout
 /// Returns stdout as String on success, or error message on failure/timeout
 fn run_command_with_timeout(
@@ -107,6 +136,11 @@ fn run_command_with_timeout_allowing_empty_exit(
 ) -> Result<String, String> {
     let mut child = Command::new(cmd_path)
         .args(args)
+        // `ps -o lstart=` follows the caller's locale. Without a fixed C locale,
+        // localized month names make the start-time value unparseable and turn
+        // the PID-reuse check into an invisible skip.
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -192,7 +226,12 @@ async fn list_ports() -> Result<PortListResponse, String> {
 }
 
 fn list_ports_blocking() -> Result<PortListResponse, String> {
-    let raw_entries = list_raw_ports()?;
+    let (raw_entries, docker) = thread::scope(|scope| {
+        let docker_handle = scope.spawn(probe_docker);
+        let raw_result = list_raw_ports();
+        let docker = docker_handle.join().unwrap_or_default();
+        raw_result.map(|entries| (entries, docker))
+    })?;
     let contexts = load_process_contexts(&raw_entries);
     let mut grouped: HashMap<String, PortProcess> = HashMap::new();
 
@@ -220,6 +259,8 @@ fn list_ports_blocking() -> Result<PortListResponse, String> {
             cwd: context.cwd.clone(),
             started_at: context.started_at.clone(),
             started_at_ts: context.started_at_ts,
+            container: None,
+            docker_proxy: false,
         });
 
         if !item.hosts.iter().any(|host| host == &entry.host) {
@@ -237,6 +278,9 @@ fn list_ports_blocking() -> Result<PortListResponse, String> {
             item.hosts.sort();
             item.ip_versions.sort();
             item.host_summary = summarize_hosts(&item.hosts, &item.ip_versions);
+            item.container = docker.ports.get(&item.port).cloned();
+            item.docker_proxy =
+                item.container.is_some() || is_docker_proxy_process(&item.process_name);
             item
         })
         .collect::<Vec<_>>();
@@ -253,6 +297,7 @@ fn list_ports_blocking() -> Result<PortListResponse, String> {
     Ok(PortListResponse {
         current_user: current_username(),
         items,
+        docker_available: docker.available,
     })
 }
 
@@ -302,6 +347,8 @@ fn kill_process_blocking(
         expected_process_name,
         expected_user,
     )?;
+
+    validate_not_docker_proxy(expected_port, expected_process_name)?;
 
     // Verify process exists before attempting to kill
     if !process_exists(pid) {
@@ -450,7 +497,7 @@ fn list_raw_ports_for_port(port: Option<u16>) -> Result<Vec<RawPortEntry>, Strin
         .map(|value| format!("-iTCP:{value}"))
         .unwrap_or_else(|| "-iTCP".to_string());
     let stdout = run_lsof_with_timeout(
-        &["-nP", &tcp_filter, "-sTCP:LISTEN", "-F", "pcLnPTu"],
+        &["-nP", "-a", &tcp_filter, "-sTCP:LISTEN", "-F", "pcLnPTu"],
         LSOF_TIMEOUT_SECS,
     )?;
 
@@ -646,6 +693,19 @@ fn load_process_info_batch(pids: &[i32]) -> HashMap<i32, (String, Option<String>
     result
 }
 
+fn first_command_token(command: &str) -> &str {
+    if let Some(quote) = command
+        .chars()
+        .next()
+        .filter(|value| *value == '"' || *value == '\'')
+    {
+        let rest = &command[quote.len_utf8()..];
+        return rest.find(quote).map_or(rest, |index| &rest[..index]);
+    }
+
+    command.split_whitespace().next().unwrap_or("")
+}
+
 fn derive_process_name(command: &str) -> Option<String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -661,15 +721,14 @@ fn derive_process_name(command: &str) -> Option<String> {
             .rsplit('/')
             .next()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.is_empty() && !value.starts_with('-'))
             .map(ToString::to_string);
     }
 
-    trimmed
-        .split_whitespace()
-        .next()
-        .map(|token| token.rsplit('/').next().unwrap_or(token).to_string())
-        .filter(|value| !value.is_empty())
+    let token = first_command_token(trimmed);
+    let executable = token.rsplit(['/', '\\']).next().unwrap_or(token).trim();
+
+    (!executable.is_empty() && !executable.starts_with('-')).then(|| executable.to_string())
 }
 
 fn load_process_cwds_batch(pids: &[i32]) -> HashMap<i32, String> {
@@ -744,6 +803,225 @@ fn current_username() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn resolve_docker_binary() -> String {
+    const CANDIDATES: [&str; 4] = [
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+        "/usr/bin/docker",
+    ];
+
+    CANDIDATES
+        .iter()
+        .find(|path| Path::new(path).is_file())
+        .copied()
+        .unwrap_or("docker")
+        .to_string()
+}
+
+fn expand_docker_port_range(value: &str) -> Option<Vec<u16>> {
+    let value = value.trim();
+    if let Some((start, end)) = value.split_once('-') {
+        let start = start.parse::<u16>().ok()?;
+        let end = end.parse::<u16>().ok()?;
+        if start == 0 || end < start {
+            return None;
+        }
+        return Some((start..=end).collect());
+    }
+
+    let port = value.parse::<u16>().ok()?;
+    (port > 0).then_some(vec![port])
+}
+
+fn parse_docker_port_mappings(field: &str) -> Vec<(u16, Option<u16>)> {
+    let mut mappings = Vec::new();
+
+    for chunk in field.split(',') {
+        let mapping = chunk.trim();
+        let Some((left, right)) = mapping.split_once("->") else {
+            continue;
+        };
+        let (container_text, protocol) = right.split_once('/').unwrap_or((right, "tcp"));
+        if !protocol.eq_ignore_ascii_case("tcp") {
+            continue;
+        }
+        let Some(colon_index) = left.rfind(':') else {
+            continue;
+        };
+
+        let Some(host_ports) = expand_docker_port_range(&left[colon_index + 1..]) else {
+            continue;
+        };
+        let container_ports = expand_docker_port_range(container_text);
+
+        for (index, host_port) in host_ports.iter().copied().enumerate() {
+            let container_port = container_ports.as_ref().and_then(|ports| {
+                if ports.len() == host_ports.len() {
+                    ports.get(index).copied()
+                } else {
+                    ports.first().copied()
+                }
+            });
+            mappings.push((host_port, container_port));
+        }
+    }
+
+    mappings
+}
+
+fn build_docker_port_map(stdout: &str) -> HashMap<u16, PortContainer> {
+    let mut ports = HashMap::new();
+
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let parts = line.split('\t').collect::<Vec<_>>();
+        if parts.len() < 3 || parts[0].trim().is_empty() {
+            continue;
+        }
+
+        let container = PortContainer {
+            name: parts[0].trim().to_string(),
+            image: parts.get(1).map_or("", |value| value.trim()).to_string(),
+            project: parts.get(3).map_or("", |value| value.trim()).to_string(),
+            service: parts.get(4).map_or("", |value| value.trim()).to_string(),
+            container_port: None,
+        };
+
+        for (host_port, container_port) in parse_docker_port_mappings(parts[2]) {
+            let mut attributed = container.clone();
+            attributed.container_port = container_port;
+            ports.entry(host_port).or_insert(attributed);
+        }
+    }
+
+    ports
+}
+
+fn is_docker_proxy_process(process_name: &str) -> bool {
+    let process_name = process_name.trim().to_ascii_lowercase();
+    !process_name.is_empty()
+        && DOCKER_PROXY_NAMES
+            .iter()
+            .any(|name| process_name.contains(name))
+}
+
+fn probe_docker() -> DockerProbe {
+    let docker_binary = resolve_docker_binary();
+    match run_command_with_timeout(
+        &docker_binary,
+        &["ps", "--no-trunc", "--format", DOCKER_FORMAT],
+        DOCKER_TIMEOUT_SECS,
+    ) {
+        Ok(stdout) => DockerProbe {
+            available: true,
+            ports: build_docker_port_map(&stdout),
+        },
+        Err(_) => DockerProbe::default(),
+    }
+}
+
+fn validate_not_docker_proxy(port: u16, process_name: &str) -> Result<(), String> {
+    let docker = probe_docker();
+    let container = docker.ports.get(&port);
+    if container.is_none() && !is_docker_proxy_process(process_name) {
+        return Ok(());
+    }
+
+    if let Some(container) = container {
+        return Err(format!(
+            "端口 {port} 由 Docker 端口转发进程持有，不能在这里结束。请在 Docker Desktop 中停止容器“{}”。结束转发进程不会停止容器，还会影响该容器发布的其它端口。",
+            container.name
+        ));
+    }
+
+    if docker.available {
+        Err(format!(
+            "端口 {port} 由 Docker 端口转发进程“{process_name}”持有，但没有找到对应容器。为避免中断 Docker 转发，已取消结束操作。"
+        ))
+    } else {
+        Err(format!(
+            "端口 {port} 由 Docker 端口转发进程“{process_name}”持有，但 Docker 当前不可用，无法确认背后的容器。为避免中断转发，已取消结束操作。"
+        ))
+    }
+}
+
+fn parse_process_parents(stdout: &str) -> HashMap<i32, i32> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.parse::<i32>().ok()?;
+            let parent_pid = parts.next()?.parse::<i32>().ok()?;
+            Some((pid, parent_pid))
+        })
+        .collect()
+}
+
+fn collect_process_chain(
+    current_pid: i32,
+    parents: &HashMap<i32, i32>,
+    depth: usize,
+) -> Option<HashSet<i32>> {
+    let mut chain = HashSet::from([current_pid]);
+    let mut cursor = current_pid;
+
+    for _ in 0..depth {
+        let parent_pid = *parents.get(&cursor)?;
+        if parent_pid <= 1 {
+            break;
+        }
+        if !chain.insert(parent_pid) {
+            return None;
+        }
+        cursor = parent_pid;
+    }
+
+    Some(chain)
+}
+
+fn current_process_chain() -> Result<HashSet<i32>, String> {
+    let current_pid = i32::try_from(std::process::id())
+        .map_err(|_| "Port Kill 的 PID 超出支持范围，无法执行安全检查".to_string())?;
+    let stdout = run_command_with_timeout("/bin/ps", &["-A", "-o", "pid=,ppid="], PS_TIMEOUT_SECS)
+        .map_err(|error| format!("无法读取 Port Kill 的进程父子关系：{error}"))?;
+    let parents = parse_process_parents(&stdout);
+
+    collect_process_chain(current_pid, &parents, SELF_CHAIN_DEPTH).ok_or_else(|| {
+        format!("无法确认 Port Kill（PID {current_pid}）所在的进程链，已取消本次操作")
+    })
+}
+
+fn validate_started_at_identity(
+    pid: i32,
+    expected_started_at_ts: Option<i64>,
+    current_started_at_ts: Option<i64>,
+) -> Result<(), String> {
+    let Some(expected_started_at_ts) = expected_started_at_ts else {
+        return Err(format!(
+            "列表中的进程 {pid} 缺少启动时间，无法确认身份，请刷新列表后重试"
+        ));
+    };
+
+    let Some(current_started_at_ts) = current_started_at_ts else {
+        return Err(format!(
+            "无法确认进程 {pid} 的启动时间，为避免误杀已取消操作，请刷新列表后重试"
+        ));
+    };
+
+    if current_started_at_ts != expected_started_at_ts {
+        return Err(format!(
+            "进程身份已变化：PID {pid} 的启动时间与列表记录不一致，请刷新后重试"
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_process_identity(
     pid: i32,
     expected_port: u16,
@@ -751,6 +1029,23 @@ fn validate_process_identity(
     expected_process_name: &str,
     expected_user: &str,
 ) -> Result<(), String> {
+    if pid <= 1 {
+        return Err("不能结束系统进程".to_string());
+    }
+
+    let current_pid = i32::try_from(std::process::id())
+        .map_err(|_| "Port Kill 的 PID 超出支持范围，无法执行安全检查".to_string())?;
+    if pid == current_pid {
+        return Err("不能结束 Port Kill 自身的进程".to_string());
+    }
+
+    let process_chain = current_process_chain()?;
+    if process_chain.contains(&pid) {
+        return Err(
+            "不能结束 Port Kill 所在的进程链上的进程（结束了当前界面也会一起退出）".to_string(),
+        );
+    }
+
     let current_user = current_username();
     if expected_user != current_user {
         return Err(format!(
@@ -773,18 +1068,11 @@ fn validate_process_identity(
         ));
     }
 
-    if let Some(expected_started_at_ts) = expected_started_at_ts {
-        let process_info = load_process_info_batch(&[pid]);
-        let current_started_at_ts = process_info
-            .get(&pid)
-            .and_then(|(_, _, started_at_ts)| *started_at_ts);
-
-        if current_started_at_ts != Some(expected_started_at_ts) {
-            return Err(format!(
-                "进程身份已变化：PID {pid} 的启动时间与列表记录不一致，请刷新后重试"
-            ));
-        }
-    }
+    let process_info = load_process_info_batch(&[pid]);
+    let current_started_at_ts = process_info
+        .get(&pid)
+        .and_then(|(_, _, started_at_ts)| *started_at_ts);
+    validate_started_at_identity(pid, expected_started_at_ts, current_started_at_ts)?;
 
     Ok(())
 }
@@ -927,6 +1215,11 @@ mod tests {
             derive_process_name("/usr/local/bin/node /project/server.js --port 3000"),
             Some("node".to_string())
         );
+        assert_eq!(
+            derive_process_name("\"C:\\Program Files\\nodejs\\node.exe\" --inspect"),
+            Some("node.exe".to_string())
+        );
+        assert_eq!(derive_process_name("--mode 1 --vm-id test"), None);
     }
 
     #[test]
@@ -950,5 +1243,111 @@ mod tests {
         assert!(process_name_matches("Node", "node"));
         assert!(!process_name_matches("", "node"));
         assert!(!process_name_matches("node", ""));
+    }
+
+    #[test]
+    fn ps_start_time_is_parsed_under_a_fixed_c_locale() {
+        let pid = std::process::id().to_string();
+        let stdout =
+            run_command_with_timeout("/bin/ps", &["-o", "lstart=", "-p", &pid], PS_TIMEOUT_SECS)
+                .expect("read this process start time");
+
+        assert!(
+            parse_ps_lstart_to_sortable_value(stdout.trim()).is_some(),
+            "unexpected localized ps output: {}",
+            stdout.trim()
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_mismatched_start_times() {
+        let missing_from_list = validate_started_at_identity(42, None, Some(1))
+            .expect_err("a missing expected start time must be rejected");
+        assert!(missing_from_list.contains("缺少启动时间"));
+
+        let missing_live = validate_started_at_identity(42, Some(1), None)
+            .expect_err("an unavailable live start time must be rejected");
+        assert!(missing_live.contains("无法确认进程 42 的启动时间"));
+
+        let changed = validate_started_at_identity(42, Some(1), Some(2))
+            .expect_err("a changed start time must be rejected");
+        assert!(changed.contains("启动时间与列表记录不一致"));
+
+        assert!(validate_started_at_identity(42, Some(1), Some(1)).is_ok());
+    }
+
+    #[test]
+    fn builds_the_current_process_chain_and_stops_before_pid_one() {
+        let parents = HashMap::from([(500, 400), (400, 300), (300, 1)]);
+        let chain = collect_process_chain(500, &parents, SELF_CHAIN_DEPTH)
+            .expect("the parent chain should be readable");
+
+        assert_eq!(chain, HashSet::from([500, 400, 300]));
+        assert!(!chain.contains(&1));
+        assert!(collect_process_chain(500, &HashMap::new(), SELF_CHAIN_DEPTH).is_none());
+    }
+
+    #[test]
+    fn rejects_the_current_process_system_process_and_its_ancestors() {
+        let current_pid = i32::try_from(std::process::id()).expect("current pid should fit in i32");
+        let self_error = validate_process_identity(current_pid, 5173, Some(1), "port-kill", "user")
+            .expect_err("the app must not terminate itself");
+        assert!(self_error.contains("Port Kill 自身"));
+
+        let system_error = validate_process_identity(1, 5173, Some(1), "launchd", "root")
+            .expect_err("pid 1 must never be terminated");
+        assert!(system_error.contains("系统进程"));
+
+        let chain = current_process_chain().expect("read the current process chain");
+        let ancestor = chain
+            .iter()
+            .copied()
+            .find(|pid| *pid != current_pid && *pid > 1);
+        if let Some(ancestor) = ancestor {
+            let ancestor_error =
+                validate_process_identity(ancestor, 5173, Some(1), "parent", "user")
+                    .expect_err("ancestors must never be terminated");
+            assert!(ancestor_error.contains("进程链"));
+        }
+    }
+
+    #[test]
+    fn maps_docker_published_tcp_ports_to_containers() {
+        let stdout = concat!(
+            "local_postgres\tpostgres:latest\t0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp\t\t\n",
+            "smartagri-redis\tredis:7-alpine\t0.0.0.0:6379->6379/tcp, 127.0.0.1:5000-5001->6000-6001/tcp\tsmartagri-ai\tredis\n",
+            "udp-only\timage\t0.0.0.0:5353->5353/udp\t\t\n"
+        );
+        let ports = build_docker_port_map(stdout);
+
+        let postgres = ports.get(&5432).expect("postgres mapping");
+        assert_eq!(postgres.name, "local_postgres");
+        assert_eq!(postgres.image, "postgres:latest");
+        assert_eq!(postgres.container_port, Some(5432));
+
+        let redis = ports.get(&6379).expect("redis mapping");
+        assert_eq!(redis.project, "smartagri-ai");
+        assert_eq!(redis.service, "redis");
+        assert_eq!(
+            ports.get(&5000).and_then(|item| item.container_port),
+            Some(6000)
+        );
+        assert_eq!(
+            ports.get(&5001).and_then(|item| item.container_port),
+            Some(6001)
+        );
+        assert!(
+            !ports.contains_key(&5353),
+            "UDP bindings are not TCP listeners"
+        );
+    }
+
+    #[test]
+    fn detects_docker_proxy_process_names() {
+        assert!(is_docker_proxy_process("com.docker.backend"));
+        assert!(is_docker_proxy_process("com.docker.backend.exe"));
+        assert!(is_docker_proxy_process("docker-proxy"));
+        assert!(!is_docker_proxy_process("node"));
+        assert!(!is_docker_proxy_process(""));
     }
 }
